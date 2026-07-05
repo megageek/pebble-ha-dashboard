@@ -1,6 +1,7 @@
 # Pebble build output
 build/
 *.pbw
+.lock-waf_linux_build
 
 # Node dependencies (pkjs / pebble tool)
 node_modules/

@@ -1,0 +1,15 @@
+# Pebble build output
+build/
+*.pbw
+
+# Node dependencies (pkjs / pebble tool)
+node_modules/
+
+# Generated assets from skill scripts
+screenshot*.png
+preview*.gif
+icon_80x80.png
+icon_144x144.png
+
+# Python venv
+.venv/

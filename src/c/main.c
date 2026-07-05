@@ -8,6 +8,19 @@
 #define PERSIST_KEY_SLOT_BASE 101  // slot i -> PERSIST_KEY_SLOT_BASE + i
 #define PERSIST_KEY_REPORT_ENABLED_BASE 200  // group i -> PERSIST_KEY_REPORT_ENABLED_BASE + i
 
+#define MAX_DOTS 4
+#define DOT_DIAMETER 12
+#define DOT_SPACING 8
+#define DOT_AREA_MARGIN 8  // gap between the dot cluster and the slot's normal content
+#define PERSIST_KEY_DOT_GROUP_SLOT 299  // which slot (0..NUM_CONFIGURABLE_SLOTS-1) also shows dots, -1 = none
+#define PERSIST_KEY_DOT_CHANNEL_BASE 300  // dot i -> PERSIST_KEY_DOT_CHANNEL_BASE + i
+#define PERSIST_KEY_CHARGE_ON_COLOR 320
+#define PERSIST_KEY_CHARGE_OFF_COLOR 321
+#define PERSIST_KEY_CHARGE_HIDE_WHEN 322
+#define PERSIST_KEY_CONN_ON_COLOR 323
+#define PERSIST_KEY_CONN_OFF_COLOR 324
+#define PERSIST_KEY_CONN_HIDE_WHEN 325
+
 typedef enum {
     CHANNEL_TIME,
     CHANNEL_DATE,
@@ -54,6 +67,15 @@ typedef struct {
     bool has_range;
     char unit[8];       // optional unit suffix for numeric channels, e.g. "%"
     char text[16];       // used when kind == CHANNEL_KIND_TEXT
+    // Status-dot rendering, used only when this channel is assigned into
+    // the dot group (see "Status dot group" below). on_color/off_color are
+    // names from a small shared palette ("red"/"orange"/"yellow"/"green"/
+    // "blue"/"purple"/"white"/"gray") — the same vocabulary Clay uses for
+    // local channels and HA sends for remote ones. hide_when: 0=always
+    // show, 1=hide when this channel is "on", 2=hide when "off".
+    char on_color[8];
+    char off_color[8];
+    int8_t hide_when;
 } ChannelData;
 
 // A slot is a screen position from a layout template. Its size class
@@ -75,6 +97,11 @@ typedef struct {
 typedef struct {
     ChannelIndex channel_index;
     SlotSizeClass size_class;
+    // This slot's own index among the configurable slots (0..
+    // NUM_CONFIGURABLE_SLOTS-1). Compared against s_dot_group_slot at draw
+    // time (not baked into a bool at creation) so changing which slot
+    // shows dots only needs mark_all_slots_dirty(), not a layout rebuild.
+    int slot_index;
 } SlotRenderInfo;
 
 static Window *s_main_window;
@@ -87,6 +114,15 @@ static ChannelData s_channels[NUM_CHANNELS];
 static int s_active_template = 0;
 // -1 means "use the template's default channel for this slot".
 static int s_slot_channel_override[NUM_CONFIGURABLE_SLOTS];
+
+// Status dot group: up to MAX_DOTS channels rendered as small colored
+// circles, for binary-ish measures that don't warrant a full slot of their
+// own. One shared group per layout (not per-slot), attached to whichever
+// configurable slot index s_dot_group_slot names — additively, alongside
+// that slot's normal channel content, not replacing it. -1 = disabled /
+// no channel assigned to that dot position.
+static int s_dot_group_slot = -1;  // which of the 5 configurable slots also shows dots; -1 = none
+static int s_dot_channels[MAX_DOTS];
 
 // Groups of outbound status-report fields (see "Outbound reporting" below),
 // each independently toggleable via Clay config.
@@ -127,26 +163,35 @@ static void init_channels(void) {
     // Remote channels pushed by Home Assistant via the pkjs WebSocket bridge.
     // Text until first update arrives; HA can repurpose a channel's kind
     // implicitly (values always arrive as strings over AppMessage today).
+    // Default dot colors before HA ever sends its own — HA can override
+    // on_color/off_color/hide_when per channel at any time (see
+    // inbox_received_callback()).
     s_channels[CHANNEL_HA_1] = (ChannelData) {
         .kind = CHANNEL_KIND_TEXT, .style = CHANNEL_STYLE_RAW, .label = "HA1", .text = "--",
+        .on_color = "green", .off_color = "red",
     };
     s_channels[CHANNEL_HA_2] = (ChannelData) {
         .kind = CHANNEL_KIND_TEXT, .style = CHANNEL_STYLE_RAW, .label = "HA2", .text = "--",
+        .on_color = "green", .off_color = "red",
     };
     s_channels[CHANNEL_HA_3] = (ChannelData) {
         .kind = CHANNEL_KIND_TEXT, .style = CHANNEL_STYLE_RAW, .label = "HA3", .text = "--",
+        .on_color = "green", .off_color = "red",
     };
 
     // Local health/status channels — same source data as the outbound
     // status report, but selectable into any slot regardless of whether
     // reporting to HA is enabled for that measure. Populated by
     // update_health_channels()/update_battery()/battery_callback(); kind
-    // may flip to TEXT ("N/A") there if a metric isn't accessible.
+    // may flip to TEXT ("N/A") there if a metric isn't accessible. Dot
+    // colors here are defaults; overridable via Clay (see load_config()).
     s_channels[CHANNEL_BATTERY_CHARGING] = (ChannelData) {
         .kind = CHANNEL_KIND_BINARY, .style = CHANNEL_STYLE_RAW, .label = "CHARGE",
+        .on_color = "green", .off_color = "gray",
     };
     s_channels[CHANNEL_CONNECTED] = (ChannelData) {
         .kind = CHANNEL_KIND_BINARY, .style = CHANNEL_STYLE_RAW, .label = "CONN",
+        .on_color = "green", .off_color = "red",
     };
     s_channels[CHANNEL_ACTIVE_MINUTES] = (ChannelData) {
         .kind = CHANNEL_KIND_NUMERIC, .style = CHANNEL_STYLE_RAW, .label = "ACTIVE", .unit = "min",
@@ -273,6 +318,49 @@ static void load_config(void) {
             s_report_enabled[i] = persist_read_int(PERSIST_KEY_REPORT_ENABLED_BASE + i) != 0;
         }
     }
+
+    s_dot_group_slot = -1;
+    if (persist_exists(PERSIST_KEY_DOT_GROUP_SLOT)) {
+        int stored = persist_read_int(PERSIST_KEY_DOT_GROUP_SLOT);
+        if (stored == -1 || (stored >= 0 && stored < NUM_CONFIGURABLE_SLOTS)) {
+            s_dot_group_slot = stored;
+        }
+    }
+
+    for (int i = 0; i < MAX_DOTS; i++) {
+        s_dot_channels[i] = -1;
+        if (persist_exists(PERSIST_KEY_DOT_CHANNEL_BASE + i)) {
+            int stored = persist_read_int(PERSIST_KEY_DOT_CHANNEL_BASE + i);
+            if (stored == -1 || (stored >= 0 && stored < NUM_CHANNELS)) {
+                s_dot_channels[i] = stored;
+            }
+        }
+    }
+
+    // Local channel dot colors/hide-when; defaults already set in
+    // init_channels(), only overridden here if a Clay save persisted one.
+    if (persist_exists(PERSIST_KEY_CHARGE_ON_COLOR)) {
+        persist_read_string(PERSIST_KEY_CHARGE_ON_COLOR, s_channels[CHANNEL_BATTERY_CHARGING].on_color,
+                             sizeof(s_channels[CHANNEL_BATTERY_CHARGING].on_color));
+    }
+    if (persist_exists(PERSIST_KEY_CHARGE_OFF_COLOR)) {
+        persist_read_string(PERSIST_KEY_CHARGE_OFF_COLOR, s_channels[CHANNEL_BATTERY_CHARGING].off_color,
+                             sizeof(s_channels[CHANNEL_BATTERY_CHARGING].off_color));
+    }
+    if (persist_exists(PERSIST_KEY_CHARGE_HIDE_WHEN)) {
+        s_channels[CHANNEL_BATTERY_CHARGING].hide_when = (int8_t)persist_read_int(PERSIST_KEY_CHARGE_HIDE_WHEN);
+    }
+    if (persist_exists(PERSIST_KEY_CONN_ON_COLOR)) {
+        persist_read_string(PERSIST_KEY_CONN_ON_COLOR, s_channels[CHANNEL_CONNECTED].on_color,
+                             sizeof(s_channels[CHANNEL_CONNECTED].on_color));
+    }
+    if (persist_exists(PERSIST_KEY_CONN_OFF_COLOR)) {
+        persist_read_string(PERSIST_KEY_CONN_OFF_COLOR, s_channels[CHANNEL_CONNECTED].off_color,
+                             sizeof(s_channels[CHANNEL_CONNECTED].off_color));
+    }
+    if (persist_exists(PERSIST_KEY_CONN_HIDE_WHEN)) {
+        s_channels[CHANNEL_CONNECTED].hide_when = (int8_t)persist_read_int(PERSIST_KEY_CONN_HIDE_WHEN);
+    }
 }
 
 static void mark_all_slots_dirty(void) {
@@ -372,23 +460,129 @@ static void draw_channel_small_row(GContext *ctx, GRect bounds, ChannelData *ch)
     }
 }
 
+// ---------------------------------------------------------------------------
+// Status dot group — a row of small colored circles for binary-ish
+// measures that don't warrant a full label+value slot. See
+// CHANNEL_DOT_GROUP_MARKER / s_dot_channels above.
+// ---------------------------------------------------------------------------
+
+// Named palette shared with Clay (local channel color pickers) and with
+// HA (on_color/off_color fields in pebble_channel_update) — see
+// HA_INTEGRATION_SPEC.md. Unrecognized/empty names fall back to light gray
+// rather than failing, since a color typo shouldn't crash rendering.
+static GColor color_from_name(const char *name) {
+    if (strcmp(name, "red") == 0) return GColorRed;
+    if (strcmp(name, "orange") == 0) return GColorOrange;
+    if (strcmp(name, "yellow") == 0) return GColorYellow;
+    if (strcmp(name, "green") == 0) return GColorGreen;
+    if (strcmp(name, "blue") == 0) return GColorBlue;
+    if (strcmp(name, "purple") == 0) return GColorPurple;
+    if (strcmp(name, "white") == 0) return GColorWhite;
+    if (strcmp(name, "gray") == 0) return GColorLightGray;
+    return GColorLightGray;
+}
+
+// "none"/"on"/"off" -> 0/1/2. Same three-value vocabulary for Clay's local
+// hide-when select and HA's hide_when field.
+static int8_t parse_hide_when(const char *s) {
+    if (strcmp(s, "on") == 0) return 1;
+    if (strcmp(s, "off") == 0) return 2;
+    return 0;
+}
+
+// A channel's "on" state for dot purposes, regardless of its kind: binary
+// and numeric channels are on when non-zero; text channels (the only kind
+// HA channels can be) are on when the value is exactly the lowercase
+// string "on" — see HA_INTEGRATION_SPEC.md for why this is a fixed literal
+// rather than a fuzzy/case-insensitive check.
+static bool channel_is_on(ChannelData *ch) {
+    switch (ch->kind) {
+        case CHANNEL_KIND_BINARY:
+        case CHANNEL_KIND_NUMERIC:
+            return ch->value != 0;
+        case CHANNEL_KIND_TEXT:
+        default:
+            return strcmp(ch->text, "on") == 0;
+    }
+}
+
+static int count_assigned_dots(void) {
+    int count = 0;
+    for (int i = 0; i < MAX_DOTS; i++) {
+        if (s_dot_channels[i] >= 0) {
+            count++;
+        }
+    }
+    return count;
+}
+
+// Draws centered within whatever (sub-)rect it's given — the caller
+// (slot_update_proc) carves out a reserved strip on the right of the slot
+// for this, rather than this function claiming the whole slot.
+static void draw_dot_group(GContext *ctx, GRect bounds) {
+    int assigned = count_assigned_dots();
+    if (assigned == 0) {
+        return;
+    }
+
+    int total_width = assigned * DOT_DIAMETER + (assigned - 1) * DOT_SPACING;
+    int start_x = bounds.origin.x + (bounds.size.w - total_width) / 2;
+    int center_y = bounds.origin.y + bounds.size.h / 2;
+
+    // Position is assigned by configured slot, not by "currently visible"
+    // slot, so a hidden dot leaves a gap rather than shifting its
+    // neighbors — otherwise dots would jump around every time one toggles.
+    int slot_i = 0;
+    for (int i = 0; i < MAX_DOTS; i++) {
+        if (s_dot_channels[i] < 0) {
+            continue;
+        }
+        ChannelData *ch = &s_channels[s_dot_channels[i]];
+        bool on = channel_is_on(ch);
+        bool hidden = (ch->hide_when == 1 && on) || (ch->hide_when == 2 && !on);
+
+        if (!hidden) {
+            int cx = start_x + slot_i * (DOT_DIAMETER + DOT_SPACING) + DOT_DIAMETER / 2;
+            GColor color = color_from_name(on ? ch->on_color : ch->off_color);
+            graphics_context_set_fill_color(ctx, color);
+            graphics_fill_circle(ctx, GPoint(cx, center_y), DOT_DIAMETER / 2);
+        }
+        slot_i++;
+    }
+}
+
 static void slot_update_proc(Layer *layer, GContext *ctx) {
     SlotRenderInfo *info = layer_get_data(layer);
-    ChannelData *ch = &s_channels[info->channel_index];
     GRect bounds = layer_get_bounds(layer);
+    ChannelData *ch = &s_channels[info->channel_index];
+
+    // Dots reserve a strip on the right, narrowing (not replacing) the
+    // area available to the slot's normal channel content — the dots are
+    // additive, shown alongside whatever channel is already assigned here.
+    GRect content_bounds = bounds;
+    if (info->slot_index == s_dot_group_slot) {
+        int assigned = count_assigned_dots();
+        if (assigned > 0) {
+            int dot_area_width = assigned * DOT_DIAMETER + (assigned - 1) * DOT_SPACING + DOT_AREA_MARGIN;
+            content_bounds.size.w -= dot_area_width;
+            GRect dot_bounds = GRect(bounds.origin.x + bounds.size.w - dot_area_width, bounds.origin.y,
+                                      dot_area_width, bounds.size.h);
+            draw_dot_group(ctx, dot_bounds);
+        }
+    }
 
     switch (info->size_class) {
         case SLOT_SIZE_HERO:
-            draw_channel_text_aligned(ctx, bounds, ch, fonts_get_system_font(FONT_KEY_BITHAM_42_BOLD),
+            draw_channel_text_aligned(ctx, content_bounds, ch, fonts_get_system_font(FONT_KEY_BITHAM_42_BOLD),
                                        GTextAlignmentCenter, GColorWhite);
             break;
         case SLOT_SIZE_MEDIUM:
-            draw_channel_text_aligned(ctx, bounds, ch, fonts_get_system_font(FONT_KEY_GOTHIC_24),
+            draw_channel_text_aligned(ctx, content_bounds, ch, fonts_get_system_font(FONT_KEY_GOTHIC_24),
                                        GTextAlignmentCenter, GColorLightGray);
             break;
         case SLOT_SIZE_SMALL:
         default:
-            draw_channel_small_row(ctx, bounds, ch);
+            draw_channel_small_row(ctx, content_bounds, ch);
             break;
     }
 }
@@ -658,6 +852,7 @@ static void load_active_layout(Layer *window_layer, GRect bounds) {
         SlotRenderInfo *info = layer_get_data(slot_layer);
         info->channel_index = channel;
         info->size_class = specs[i].size_class;
+        info->slot_index = i;
         layer_set_update_proc(slot_layer, slot_update_proc);
         layer_add_child(window_layer, slot_layer);
         s_slot_layers[i] = slot_layer;
@@ -681,6 +876,43 @@ static void destroy_active_layout(void) {
         layer_destroy(s_separator_layer);
         s_separator_layer = NULL;
     }
+}
+
+// Shared by the two local dot-capable channels (battery charging, phone
+// connection) to apply+persist on_color/off_color/hide_when tuples from a
+// Clay save. Returns true if anything actually changed, so the caller can
+// fold that into its own "does this need a redraw" tracking.
+static bool apply_dot_color_config(DictionaryIterator *iterator, ChannelIndex channel,
+                                    uint32_t on_color_key, uint32_t off_color_key, uint32_t hide_when_key,
+                                    int persist_on_color_key, int persist_off_color_key,
+                                    int persist_hide_when_key) {
+    bool changed = false;
+    ChannelData *ch = &s_channels[channel];
+
+    Tuple *on_tuple = dict_find(iterator, on_color_key);
+    if (on_tuple && on_tuple->type == TUPLE_CSTRING) {
+        strncpy(ch->on_color, on_tuple->value->cstring, sizeof(ch->on_color) - 1);
+        ch->on_color[sizeof(ch->on_color) - 1] = '\0';
+        persist_write_string(persist_on_color_key, ch->on_color);
+        changed = true;
+    }
+
+    Tuple *off_tuple = dict_find(iterator, off_color_key);
+    if (off_tuple && off_tuple->type == TUPLE_CSTRING) {
+        strncpy(ch->off_color, off_tuple->value->cstring, sizeof(ch->off_color) - 1);
+        ch->off_color[sizeof(ch->off_color) - 1] = '\0';
+        persist_write_string(persist_off_color_key, ch->off_color);
+        changed = true;
+    }
+
+    Tuple *hide_tuple = dict_find(iterator, hide_when_key);
+    if (hide_tuple && hide_tuple->type == TUPLE_CSTRING) {
+        ch->hide_when = parse_hide_when(hide_tuple->value->cstring);
+        persist_write_int(persist_hide_when_key, ch->hide_when);
+        changed = true;
+    }
+
+    return changed;
 }
 
 static void inbox_received_callback(DictionaryIterator *iterator, void *context) {
@@ -722,6 +954,19 @@ static void inbox_received_callback(DictionaryIterator *iterator, void *context)
     const uint32_t ha_label_keys[NUM_HA_CHANNELS] = {
         MESSAGE_KEY_HA1_LABEL, MESSAGE_KEY_HA2_LABEL, MESSAGE_KEY_HA3_LABEL,
     };
+    // Optional dot-styling fields HA can send alongside value/label — see
+    // HA_INTEGRATION_SPEC.md. Presence isn't what marks a channel as
+    // dot-able (any channel can be put in the dot group); these just
+    // control how it looks if it is.
+    const uint32_t ha_on_color_keys[NUM_HA_CHANNELS] = {
+        MESSAGE_KEY_HA1_ON_COLOR, MESSAGE_KEY_HA2_ON_COLOR, MESSAGE_KEY_HA3_ON_COLOR,
+    };
+    const uint32_t ha_off_color_keys[NUM_HA_CHANNELS] = {
+        MESSAGE_KEY_HA1_OFF_COLOR, MESSAGE_KEY_HA2_OFF_COLOR, MESSAGE_KEY_HA3_OFF_COLOR,
+    };
+    const uint32_t ha_hide_when_keys[NUM_HA_CHANNELS] = {
+        MESSAGE_KEY_HA1_HIDE_WHEN, MESSAGE_KEY_HA2_HIDE_WHEN, MESSAGE_KEY_HA3_HIDE_WHEN,
+    };
     const ChannelIndex ha_channels[NUM_HA_CHANNELS] = { CHANNEL_HA_1, CHANNEL_HA_2, CHANNEL_HA_3 };
 
     for (int i = 0; i < NUM_HA_CHANNELS; i++) {
@@ -739,6 +984,26 @@ static void inbox_received_callback(DictionaryIterator *iterator, void *context)
         if (label_tuple && label_tuple->type == TUPLE_CSTRING) {
             strncpy(ch->label, label_tuple->value->cstring, sizeof(ch->label) - 1);
             ch->label[sizeof(ch->label) - 1] = '\0';
+            value_changed = true;
+        }
+
+        Tuple *on_color_tuple = dict_find(iterator, ha_on_color_keys[i]);
+        if (on_color_tuple && on_color_tuple->type == TUPLE_CSTRING) {
+            strncpy(ch->on_color, on_color_tuple->value->cstring, sizeof(ch->on_color) - 1);
+            ch->on_color[sizeof(ch->on_color) - 1] = '\0';
+            value_changed = true;
+        }
+
+        Tuple *off_color_tuple = dict_find(iterator, ha_off_color_keys[i]);
+        if (off_color_tuple && off_color_tuple->type == TUPLE_CSTRING) {
+            strncpy(ch->off_color, off_color_tuple->value->cstring, sizeof(ch->off_color) - 1);
+            ch->off_color[sizeof(ch->off_color) - 1] = '\0';
+            value_changed = true;
+        }
+
+        Tuple *hide_when_tuple = dict_find(iterator, ha_hide_when_keys[i]);
+        if (hide_when_tuple && hide_when_tuple->type == TUPLE_CSTRING) {
+            ch->hide_when = parse_hide_when(hide_when_tuple->value->cstring);
             value_changed = true;
         }
     }
@@ -766,7 +1031,53 @@ static void inbox_received_callback(DictionaryIterator *iterator, void *context)
         }
     }
 
-    if (!layout_changed && !value_changed && !reporting_config_changed) {
+    // Status dot group: which slot shows it, which channels feed it, and
+    // (for the two local dot-capable channels) their colors/hide-when.
+    // None of this changes slot rects/count, only what a slot draws, so
+    // it's redraw-only (mark_all_slots_dirty()) — never a layout rebuild.
+    bool dot_config_changed = false;
+
+    Tuple *dot_group_slot_tuple = dict_find(iterator, MESSAGE_KEY_DOT_GROUP_SLOT);
+    if (dot_group_slot_tuple) {
+        int value = (int)dot_group_slot_tuple->value->int32;
+        if (value == -1 || (value >= 0 && value < NUM_CONFIGURABLE_SLOTS)) {
+            s_dot_group_slot = value;
+            persist_write_int(PERSIST_KEY_DOT_GROUP_SLOT, value);
+            dot_config_changed = true;
+        }
+    }
+
+    const uint32_t dot_channel_keys[MAX_DOTS] = {
+        MESSAGE_KEY_DOT_0_CHANNEL, MESSAGE_KEY_DOT_1_CHANNEL,
+        MESSAGE_KEY_DOT_2_CHANNEL, MESSAGE_KEY_DOT_3_CHANNEL,
+    };
+    for (int i = 0; i < MAX_DOTS; i++) {
+        Tuple *tuple = dict_find(iterator, dot_channel_keys[i]);
+        if (!tuple) {
+            continue;
+        }
+        int value = (int)tuple->value->int32;
+        if (value == -1 || (value >= 0 && value < NUM_CHANNELS)) {
+            s_dot_channels[i] = value;
+            persist_write_int(PERSIST_KEY_DOT_CHANNEL_BASE + i, value);
+            dot_config_changed = true;
+        }
+    }
+
+    if (apply_dot_color_config(iterator, CHANNEL_BATTERY_CHARGING, MESSAGE_KEY_CHARGE_ON_COLOR,
+                                MESSAGE_KEY_CHARGE_OFF_COLOR, MESSAGE_KEY_CHARGE_HIDE_WHEN,
+                                PERSIST_KEY_CHARGE_ON_COLOR, PERSIST_KEY_CHARGE_OFF_COLOR,
+                                PERSIST_KEY_CHARGE_HIDE_WHEN)) {
+        dot_config_changed = true;
+    }
+    if (apply_dot_color_config(iterator, CHANNEL_CONNECTED, MESSAGE_KEY_CONN_ON_COLOR,
+                                MESSAGE_KEY_CONN_OFF_COLOR, MESSAGE_KEY_CONN_HIDE_WHEN,
+                                PERSIST_KEY_CONN_ON_COLOR, PERSIST_KEY_CONN_OFF_COLOR,
+                                PERSIST_KEY_CONN_HIDE_WHEN)) {
+        dot_config_changed = true;
+    }
+
+    if (!layout_changed && !value_changed && !reporting_config_changed && !dot_config_changed) {
         return;
     }
 
@@ -780,7 +1091,7 @@ static void inbox_received_callback(DictionaryIterator *iterator, void *context)
         update_battery();
         update_steps();
         update_health_channels();
-    } else if (value_changed) {
+    } else if (value_changed || dot_config_changed) {
         mark_all_slots_dirty();
     }
 
@@ -805,6 +1116,7 @@ static void main_window_load(Window *window) {
     update_time();
     update_battery();
     update_steps();
+    update_health_channels();
 }
 
 static void main_window_unload(Window *window) {

@@ -22,6 +22,17 @@ var WATCH_SETTINGS_KEYS = [
   "REPORT_ENABLE_HEART_RATE",
   "REPORT_ENABLE_CONNECTED",
   "REPORT_ENABLE_DEVICE_INFO",
+  "DOT_GROUP_SLOT",
+  "DOT_0_CHANNEL",
+  "DOT_1_CHANNEL",
+  "DOT_2_CHANNEL",
+  "DOT_3_CHANNEL",
+  "CHARGE_ON_COLOR",
+  "CHARGE_OFF_COLOR",
+  "CHARGE_HIDE_WHEN",
+  "CONN_ON_COLOR",
+  "CONN_OFF_COLOR",
+  "CONN_HIDE_WHEN",
 ];
 
 Pebble.addEventListener("showConfiguration", function () {
@@ -124,7 +135,12 @@ function scheduleHaReconnect() {
   haReconnectDelay = Math.min(haReconnectDelay * 2, RECONNECT_MAX_DELAY_MS);
 }
 
-function sendHaChannelToWatch(channel, value, label) {
+// onColor/offColor/hideWhen are optional — see HA_INTEGRATION_SPEC.md.
+// Their presence isn't what marks a channel as dot-capable (any channel
+// can be assigned into the dot group on the watch side); they just style
+// it if it is. hideWhen must be "none"/"on"/"off" (see parse_hide_when()
+// on the C side).
+function sendHaChannelToWatch(channel, value, label, onColor, offColor, hideWhen) {
   var channelNum = Number(channel);
   if (!(channelNum >= 1 && channelNum <= NUM_HA_CHANNELS)) {
     console.log("Ignoring HA update for unknown channel: " + channel);
@@ -135,6 +151,15 @@ function sendHaChannelToWatch(channel, value, label) {
   dict["HA" + channelNum + "_VALUE"] = String(value).substring(0, 15);
   if (label !== undefined && label !== null) {
     dict["HA" + channelNum + "_LABEL"] = String(label).substring(0, 7);
+  }
+  if (onColor !== undefined && onColor !== null) {
+    dict["HA" + channelNum + "_ON_COLOR"] = String(onColor).substring(0, 7);
+  }
+  if (offColor !== undefined && offColor !== null) {
+    dict["HA" + channelNum + "_OFF_COLOR"] = String(offColor).substring(0, 7);
+  }
+  if (hideWhen !== undefined && hideWhen !== null) {
+    dict["HA" + channelNum + "_HIDE_WHEN"] = String(hideWhen).substring(0, 4);
   }
 
   Pebble.sendAppMessage(
@@ -228,11 +253,17 @@ function connectToHomeAssistant() {
       }
       var channels = (message.result && message.result.channels) || [];
       channels.forEach(function (item) {
-        sendHaChannelToWatch(item.channel, item.value, item.label);
+        sendHaChannelToWatch(
+          item.channel, item.value, item.label,
+          item.on_color, item.off_color, item.hide_when
+        );
       });
     } else if (message.id === haSubscriptionId && message.type === "event") {
       var item = message.event || {};
-      sendHaChannelToWatch(item.channel, item.value, item.label);
+      sendHaChannelToWatch(
+        item.channel, item.value, item.label,
+        item.on_color, item.off_color, item.hide_when
+      );
     }
   };
 

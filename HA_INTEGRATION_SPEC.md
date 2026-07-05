@@ -63,14 +63,25 @@ If the integration isn't installed at all, HA responds to any unrecognized comma
 {
   "channel": 1,
   "value": "21.5°C",
-  "label": "Temp"
+  "label": "Temp",
+  "on_color": "red",
+  "off_color": "green",
+  "hide_when": "off"
 }
 ```
 
 - **`channel`** — integer `1`, `2`, or `3`. There are exactly **3 channels** in the current watchface (`CHANNEL_HA_1`/`CHANNEL_HA_2`/`CHANNEL_HA_3` on the watch side). Any other value (0, 4+, non-numeric) is silently ignored by the phone — not an error, just dropped.
-- **`value`** — required. Always treated as a **plain string** by the watch today; there is no numeric/unit-aware or binary (on/off) channel type on the HA side yet, even though the watch's internal channel model supports those kinds for local channels (battery, steps). A temperature should be sent as a fully-formatted string like `"21.5°C"`, not a bare number — the watch will display exactly what's sent, with no unit suffix or number formatting applied.
+- **`value`** — required. Always treated as a **plain string** by the watch today; there is no numeric/unit-aware channel type on the HA side yet, even though the watch's internal channel model supports that kind for local channels (battery, steps). A temperature should be sent as a fully-formatted string like `"21.5°C"`, not a bare number — the watch will display exactly what's sent, with no unit suffix or number formatting applied. **If this channel is ever displayed as a status dot** (see below — entirely the watch user's choice, not something HA controls), send the literal lowercase string `"on"` or `"off"` so the watch can tell which dot color to use; any other value is always treated as "off" for dot purposes, no case-insensitive or fuzzy matching.
 - **`label`** — optional. If omitted, the watch keeps showing whatever label it last had for that channel (including the compiled-in default, e.g. `"HA1"`, if none has ever been sent). Only send it when it changes or on the first update for a channel.
-- **Truncation, enforced phone-side, not HA-side**: `value` is cut to **15 characters**, `label` to **7 characters** before being relayed to the watch (hard limit of the watch's fixed-size buffers). Truncation is a dumb substring cut, not word-aware — prefer sending values that are already short (e.g. `"21.5°C"` rather than `"21.5 degrees Celsius"`) rather than relying on the phone to truncate sensibly.
+- **`on_color`/`off_color`** — optional, only relevant if the watch user has put this channel in their status-dot group (see below). A name from the shared palette: `red`, `orange`, `yellow`, `green`, `blue`, `purple`, `white`, `gray`. Unrecognized/misspelled names fall back to gray rather than erroring. If never sent, the watch defaults both to green/red.
+- **`hide_when`** — optional, `"none"` (default — always show the dot), `"on"`, or `"off"`. Lets a "problem" indicator stay invisible until it actually needs attention (e.g. `hide_when: "off"` on a door-open sensor so the dot only appears when the door actually opens) rather than showing a "everything's fine" dot all the time.
+- **Truncation, enforced phone-side, not HA-side**: `value` is cut to **15 characters**, `label` to **7 characters**, `on_color`/`off_color` to **7 characters**, `hide_when` to **4 characters** before being relayed to the watch (hard limits of the watch's fixed-size buffers). Truncation is a dumb substring cut, not word-aware — prefer sending values that are already short (e.g. `"21.5°C"` rather than `"21.5 degrees Celsius"`) rather than relying on the phone to truncate sensibly.
+
+## Status dots (optional, watch-side display feature)
+
+The watchface can show up to 4 small colored dots inside one screen slot, **in addition to** whatever that slot's normal channel shows — for binary-ish measures that don't need a whole slot of their own. **This is entirely a watch/Clay-side display choice** — which slot, which channels feed the dots, is all configured on the watch, not by HA. The integration's only role is optionally supplying `on_color`/`off_color`/`hide_when` (above) so a channel looks reasonable *if* the user chooses to display it as a dot — there's no way for HA to force a channel to be shown as a dot, and no need to tell HA which channels currently are.
+
+If your integration doesn't care about dot styling, it can simply never send `on_color`/`off_color`/`hide_when` — the watch has its own defaults (green="on"/red="off", always visible) and dot rendering works fine without any HA-side involvement.
 
 ## Watch → HA: status reports (battery, health, device info)
 
@@ -122,11 +133,11 @@ Each measure group (`battery`, `steps`, `activity`, `sleep`, `heart_rate`, `conn
 | Direction | Message | Shape | Notes |
 |---|---|---|---|
 | Phone → HA | `pebble_dashboard/subscribe_channels` command | `{id, type}` | Sent once per successful auth (startup + every reconnect) |
-| HA → phone | `result` (reply to the command above) | `{id, type: "result", success, result: {channels: [{channel, value, label?}, ...]}}` | Current state, sent once, immediately |
-| HA → phone | `event` (tagged with the same `id`) | `{id, type: "event", event: {channel, value, label?}}` | Every subsequent change, ongoing |
+| HA → phone | `result` (reply to the command above) | `{id, type: "result", success, result: {channels: [{channel, value, label?, on_color?, off_color?, hide_when?}, ...]}}` | Current state, sent once, immediately |
+| HA → phone | `event` (tagged with the same `id`) | `{id, type: "event", event: {channel, value, label?, on_color?, off_color?, hide_when?}}` | Every subsequent change, ongoing |
 | Phone → HA | `pebble_dashboard/report_status` command | `{id, type, status: {battery_percent, battery_charging, connected, steps, active_seconds, distance_meters, active_kcal, resting_kcal, sleep_seconds, sleep_restful_seconds, heart_rate_bpm, model, firmware, color, disabled}}` (all fields optional) | Sent once/minute + on battery change + immediately on a reporting-toggle change; device info fields once at startup only; `disabled` is a comma-separated group-name string, resent every time, absent if nothing's disabled |
 | HA → phone | `result` (reply to the command above) | `{id, type: "result", success: true}` | Ack only; phone ignores the reply content |
 
 ## Testing this contract without a real integration
 
-The phone-side implementation (`src/pkjs/index.js`) has its own test suite at `test/ha_bridge.test.js` (mock WebSocket, no real HA server) that asserts on exactly the message shapes described above, including the initial-state-via-result path, a rejected/unknown-command scenario, the `report_status` relay (correct field naming, dropped when unauthenticated, nothing sent for an empty status), Clay's boolean toggle values converting to 1/0 ints for the `REPORT_ENABLE_*` keys, and a string-valued field (`disabled`) relaying correctly alongside numeric ones — useful as a live reference for the wire format if this document and the code ever drift.
+The phone-side implementation (`src/pkjs/index.js`) has its own test suite at `test/ha_bridge.test.js` (mock WebSocket, no real HA server) that asserts on exactly the message shapes described above, including the initial-state-via-result path, a rejected/unknown-command scenario, the `report_status` relay (correct field naming, dropped when unauthenticated, nothing sent for an empty status), Clay's boolean toggle values converting to 1/0 ints for the `REPORT_ENABLE_*` keys, a string-valued field (`disabled`) relaying correctly alongside numeric ones, and `on_color`/`off_color`/`hide_when` relaying correctly (including that each is independently optional) — useful as a live reference for the wire format if this document and the code ever drift.

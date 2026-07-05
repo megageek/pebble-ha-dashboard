@@ -114,10 +114,19 @@ function freshEnv() {
     return null;
   }
 
-  function sendChannelEvent(channel, value, label) {
+  function sendChannelEvent(channel, value, label, onColor, offColor, hideWhen) {
     var data = { channel: channel, value: value };
     if (label !== undefined) {
       data.label = label;
+    }
+    if (onColor !== undefined) {
+      data.on_color = onColor;
+    }
+    if (offColor !== undefined) {
+      data.off_color = offColor;
+    }
+    if (hideWhen !== undefined) {
+      data.hide_when = hideWhen;
     }
     lastSocket.onmessage({
       data: JSON.stringify({ id: subscriptionId(), type: "event", event: data }),
@@ -275,6 +284,39 @@ function freshEnv() {
   assert(
     msg.HA1_LABEL.length === LABEL_LIMIT && msg.HA1_LABEL === longLabel.substring(0, LABEL_LIMIT),
     "label truncated to " + LABEL_LIMIT + " chars, got " + JSON.stringify(msg.HA1_LABEL)
+  );
+})();
+
+// --- Test 6b: HA-supplied dot styling (on_color/off_color/hide_when)
+// relays through to the watch as HAn_ON_COLOR/HAn_OFF_COLOR/HAn_HIDE_WHEN ---
+(function testDotStylingRelay() {
+  var env = freshEnv();
+  env.authenticate();
+
+  env.sendChannelEvent(2, "on", "Door", "red", "green", "off");
+
+  assert(env.sentAppMessages.length === 1, "relayed one AppMessage for a dot-styled update");
+  var msg = env.sentAppMessages[0];
+  assert(
+    msg.HA2_ON_COLOR === "red" && msg.HA2_OFF_COLOR === "green" && msg.HA2_HIDE_WHEN === "off",
+    "on_color/off_color/hide_when relayed correctly, got " + JSON.stringify(msg)
+  );
+})();
+
+// --- Test 6c: dot styling fields are each independently optional ---
+(function testDotStylingFieldsOptional() {
+  var env = freshEnv();
+  env.authenticate();
+
+  env.sendChannelEvent(3, "off", undefined, "blue"); // only on_color, no label/off_color/hide_when
+
+  var msg = env.sentAppMessages[0];
+  assert(
+    msg.HA3_ON_COLOR === "blue" &&
+      !("HA3_LABEL" in msg) &&
+      !("HA3_OFF_COLOR" in msg) &&
+      !("HA3_HIDE_WHEN" in msg),
+    "only the supplied dot-styling field is sent, got " + JSON.stringify(msg)
   );
 })();
 

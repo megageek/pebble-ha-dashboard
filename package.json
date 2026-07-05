@@ -57,7 +57,27 @@
       "REPORT_ENABLE_SLEEP",
       "REPORT_ENABLE_HEART_RATE",
       "REPORT_ENABLE_CONNECTED",
-      "REPORT_ENABLE_DEVICE_INFO"
+      "REPORT_ENABLE_DEVICE_INFO",
+      "HA1_ON_COLOR",
+      "HA1_OFF_COLOR",
+      "HA1_HIDE_WHEN",
+      "HA2_ON_COLOR",
+      "HA2_OFF_COLOR",
+      "HA2_HIDE_WHEN",
+      "HA3_ON_COLOR",
+      "HA3_OFF_COLOR",
+      "HA3_HIDE_WHEN",
+      "DOT_GROUP_SLOT",
+      "DOT_0_CHANNEL",
+      "DOT_1_CHANNEL",
+      "DOT_2_CHANNEL",
+      "DOT_3_CHANNEL",
+      "CHARGE_ON_COLOR",
+      "CHARGE_OFF_COLOR",
+      "CHARGE_HIDE_WHEN",
+      "CONN_ON_COLOR",
+      "CONN_OFF_COLOR",
+      "CONN_HIDE_WHEN"
     ],
     "resources": {
       "media": []

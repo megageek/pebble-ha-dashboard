@@ -11,8 +11,13 @@ static TextLayer *s_channel_value_layers[NUM_CHANNELS];
 
 static char s_time_buffer[8];
 static char s_date_buffer[16];
+static char s_battery_buffer[8];
+static char s_steps_buffer[12];
 
-static const char *s_channel_labels[NUM_CHANNELS] = { "CH1", "CH2", "CH3" };
+// Slots 0 and 1 are always-available local channels (battery, steps).
+// Slot 2 stands in for a Home Assistant-pushed channel until the pkjs
+// bridge exists.
+static const char *s_channel_labels[NUM_CHANNELS] = { "BATT", "STEPS", "CH3" };
 static const char *s_channel_placeholder = "--";
 
 static void separator_update_proc(Layer *layer, GContext *ctx) {
@@ -37,8 +42,42 @@ static void update_time(void) {
     text_layer_set_text(s_date_layer, s_date_buffer);
 }
 
+static void update_battery(void) {
+    BatteryChargeState state = battery_state_service_peek();
+    snprintf(s_battery_buffer, sizeof(s_battery_buffer), "%d%%", state.charge_percent);
+    if (s_channel_value_layers[0]) {
+        text_layer_set_text(s_channel_value_layers[0], s_battery_buffer);
+    }
+}
+
+static void update_steps(void) {
+    time_t start = time_start_of_today();
+    time_t end = time(NULL);
+    HealthServiceAccessibilityMask mask =
+        health_service_metric_accessible(HealthMetricStepCount, start, end);
+
+    if (mask & HealthServiceAccessibilityMaskAvailable) {
+        HealthValue steps = health_service_sum_today(HealthMetricStepCount);
+        snprintf(s_steps_buffer, sizeof(s_steps_buffer), "%d", (int)steps);
+    } else {
+        snprintf(s_steps_buffer, sizeof(s_steps_buffer), "N/A");
+    }
+
+    if (s_channel_value_layers[1]) {
+        text_layer_set_text(s_channel_value_layers[1], s_steps_buffer);
+    }
+}
+
+static void battery_callback(BatteryChargeState state) {
+    snprintf(s_battery_buffer, sizeof(s_battery_buffer), "%d%%", state.charge_percent);
+    if (s_channel_value_layers[0]) {
+        text_layer_set_text(s_channel_value_layers[0], s_battery_buffer);
+    }
+}
+
 static void tick_handler(struct tm *tick_time, TimeUnits units_changed) {
     update_time();
+    update_steps();
 }
 
 static void main_window_load(Window *window) {
@@ -105,6 +144,8 @@ static void main_window_load(Window *window) {
     }
 
     update_time();
+    update_battery();
+    update_steps();
 }
 
 static void main_window_unload(Window *window) {
@@ -127,10 +168,12 @@ static void init(void) {
     window_stack_push(s_main_window, true);
 
     tick_timer_service_subscribe(MINUTE_UNIT, tick_handler);
+    battery_state_service_subscribe(battery_callback);
 }
 
 static void deinit(void) {
     tick_timer_service_unsubscribe();
+    battery_state_service_unsubscribe();
     window_destroy(s_main_window);
 }
 

@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project
 
-This repo is for a **Pebble smartwatch watchface that displays data from a linked Home Assistant instance** (e.g. sensor states, temperatures, switch/light status). No watchface project has been generated yet — the repo currently only contains the `pebble-watchface` skill and an empty Python venv (uv-managed, no packages installed beyond pip/uv itself). The actual Pebble project (package.json, wscript, src/c/, src/pkjs/) is created by following the skill below.
+This repo is for a **Pebble smartwatch watchface that displays data from a linked Home Assistant instance** (e.g. sensor states, temperatures, switch/light status), plus a couple of always-available local channels (battery, steps). A basic scaffold exists at the repo root (`package.json`, `wscript`, `src/c/main.c`, emery-only): digital time + date, and 3 channel rows. Not yet built: `src/pkjs/index.js` (HA WebSocket bridge), the Clay config page for channel→slot mapping, and gabbro support. Follow the skill below for build/test workflow and the "Architecture" section for how HA data should be wired in.
 
 ## Building the watchface
 
@@ -15,7 +15,7 @@ Use the **pebble-watchface** skill (`.claude/skills/pebble-watchface/SKILL.md`, 
 - **No floating point** — use `sin_lookup`/`cos_lookup`/`DEG_TO_TRIGANGLE`.
 - Use `layer_get_bounds()` for screen dimensions; never hardcode 200x228 or other platform sizes.
 
-### Commands (once the project exists)
+### Commands
 ```bash
 pebble build                                   # compile, produces build/*.pbw
 pebble install --emulator emery                # install to QEMU emulator
@@ -31,6 +31,12 @@ python3 .claude/skills/pebble-watchface/scripts/create_app_icons.py .
 python3 .claude/skills/pebble-watchface/scripts/create_preview_gif.py . --frames 8 --delay 400
 ```
 There is no separate lint/test suite — correctness is verified by building, running in the QEMU emulator, and visually checking a captured screenshot with the Read tool (mandatory per the skill before calling anything "done").
+
+## Architecture: local channels vs. remote (HA) channels
+
+Not every channel comes from Home Assistant. **Battery level and step count are local channels** — read directly from on-watch services (`battery_state_service_peek()`/`battery_state_service_subscribe()`, and `health_service_sum_today(HealthMetricStepCount)` gated by `health_service_metric_accessible()`) with no phone or network round-trip at all. They sit in the **same selectable channel pool** as HA channels: from the config/slot-mapping point of view a display slot doesn't care whether the channel behind it is "local" or "remote", only that it has a label + value to render. Internally the two sources just update the same `TextLayer` widgets through different code paths — local channels refresh from `tick_handler` (and a `battery_state_service_subscribe` callback for instant charge changes), remote HA channels refresh from `inbox_received_callback` when pkjs relays a push (see below).
+
+`src/c/main.c` currently wires slot 0 → `BATT`, slot 1 → `STEPS` (both local, real data, no capability flags needed in `package.json`), and slot 2 → `CH3` (static `--` placeholder standing in for a future HA-pushed channel). This 0/1-local, 2-remote split is hardcoded for now; once the Clay config page exists, slot→channel assignment (including whether a slot points at a local or remote channel) becomes user-configurable rather than fixed by array index.
 
 ## Architecture: Home Assistant data flow (push, channel-based)
 

@@ -2,7 +2,7 @@
 
 **This is the contract the Pebble watchface's phone-side bridge (`src/pkjs/index.js`) expects from Home Assistant.** It exists to be copied into whatever repo builds the actual HA-side custom integration — that side isn't implemented anywhere in *this* repo, only consumed. If you change the wire protocol here (command name, channel count, payload shape, truncation limits), update this file in the same commit; it's the only place the contract is written down independent of the watch/phone source.
 
-*Last synced with `pebble-ha-dashboard` commit `42c23b8` + the custom-WS-command redesign (2026-07-05).*
+*Last synced with `pebble-ha-dashboard` commit `0d53e04` (2026-07-05).*
 
 **This requires a real custom integration, not just automations.** Home Assistant's generic event bus (`fire_event`/`subscribe_events`) is no longer used — instead the integration registers its own WebSocket API command. That means someone needs to write a `custom_components/<domain>/` Python package with a `websocket_api.async_register_command` handler; this can't be wired up purely through the UI/YAML automations the way a "fire an event on state change" approach could.
 

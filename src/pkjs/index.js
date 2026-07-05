@@ -58,19 +58,19 @@ Pebble.addEventListener("webviewclosed", function (e) {
 // ---------------------------------------------------------------------------
 // Home Assistant WebSocket bridge
 //
-// Home Assistant pushes channel updates by firing a custom event (fired by a
-// user-configured automation/integration action); pkjs holds a persistent
-// WebSocket to HA's native /api/websocket endpoint and relays each event to
-// the watch immediately via AppMessage. There is no polling and no
-// watch-originated request — see CLAUDE.md for the full design.
+// pkjs holds a persistent WebSocket to HA's native /api/websocket endpoint
+// (same connection/auth session HA already provides — not a separate
+// server) and issues one custom command, registered by the HA-side
+// integration itself, to both fetch current channel state and subscribe to
+// future changes in a single round trip. There is no polling and no
+// generic-event-bus usage — see HA_INTEGRATION_SPEC.md for the full
+// contract this expects from the integration.
 // ---------------------------------------------------------------------------
 
-var HA_EVENT_TYPE = "pebble_channel_update";
-// Fired right after every successful auth (startup AND reconnect). The
-// HA-side automation should respond by re-publishing pebble_channel_update
-// for every channel it manages, so the watch shows real data immediately
-// instead of sitting on placeholders until the next organic state change.
-var HA_REQUEST_STATE_EVENT_TYPE = "pebble_request_state";
+// A custom WebSocket API command (see websocket_api.async_register_command
+// in the HA integration), not a core command — it isn't admin-gated unless
+// the integration explicitly adds that, unlike fire_event.
+var HA_SUBSCRIBE_COMMAND = "pebble_dashboard/subscribe_channels";
 var NUM_HA_CHANNELS = 3;
 var RECONNECT_BASE_DELAY_MS = 2000;
 var RECONNECT_MAX_DELAY_MS = 30000;
@@ -79,6 +79,10 @@ var haSocket = null;
 var haReconnectTimer = null;
 var haReconnectDelay = RECONNECT_BASE_DELAY_MS;
 var haNextRequestId = 1;
+// The id of our subscribe_channels command, so incoming "result"/"event"
+// messages can be matched to it (HA multiplexes everything over one
+// connection, keyed by request id).
+var haSubscriptionId = null;
 
 function getHaConfig() {
   var settings = {};
@@ -140,6 +144,7 @@ function connectToHomeAssistant() {
     haSocket.onclose = null; // this socket is being replaced, not lost
     haSocket.close();
   }
+  haSubscriptionId = null;
 
   var wsUrl = config.url.replace(/\/+$/, "") + "/api/websocket";
   console.log("Connecting to Home Assistant: " + wsUrl);
@@ -159,33 +164,29 @@ function connectToHomeAssistant() {
     } else if (message.type === "auth_ok") {
       console.log("Home Assistant auth succeeded");
       haReconnectDelay = RECONNECT_BASE_DELAY_MS;
-      haSocket.send(
-        JSON.stringify({
-          id: haNextRequestId++,
-          type: "subscribe_events",
-          event_type: HA_EVENT_TYPE,
-        })
-      );
-      // Ask for the current state of every channel right away — don't make
-      // the watch wait on placeholders until something happens to change.
-      // Requires the token's user to be an admin: HA's fire_event WS command
-      // is admin-only.
-      haSocket.send(
-        JSON.stringify({
-          id: haNextRequestId++,
-          type: "fire_event",
-          event_type: HA_REQUEST_STATE_EVENT_TYPE,
-        })
-      );
+      haSubscriptionId = haNextRequestId++;
+      // One command both fetches current state (in the "result" reply
+      // below) and subscribes to future changes ("event" messages tagged
+      // with this same id) — no separate request-state round trip needed.
+      haSocket.send(JSON.stringify({ id: haSubscriptionId, type: HA_SUBSCRIBE_COMMAND }));
     } else if (message.type === "auth_invalid") {
       console.log("Home Assistant auth failed: " + message.message);
-    } else if (
-      message.type === "event" &&
-      message.event &&
-      message.event.event_type === HA_EVENT_TYPE
-    ) {
-      var data = message.event.data || {};
-      sendHaChannelToWatch(data.channel, data.value, data.label);
+    } else if (message.id === haSubscriptionId && message.type === "result") {
+      if (!message.success) {
+        // Most likely cause: the HA-side integration isn't installed, so
+        // this custom command isn't registered at all.
+        console.log(
+          "Home Assistant rejected " + HA_SUBSCRIBE_COMMAND + ": " + JSON.stringify(message.error)
+        );
+        return;
+      }
+      var channels = (message.result && message.result.channels) || [];
+      channels.forEach(function (item) {
+        sendHaChannelToWatch(item.channel, item.value, item.label);
+      });
+    } else if (message.id === haSubscriptionId && message.type === "event") {
+      var item = message.event || {};
+      sendHaChannelToWatch(item.channel, item.value, item.label);
     }
   };
 

@@ -13,6 +13,7 @@ var path = require("path");
 
 var BUNDLE_PATH = path.join(__dirname, "..", "build", "pebble-js-app.js");
 
+var HA_SUBSCRIBE_COMMAND = "pebble_dashboard/subscribe_channels"; // must match src/pkjs/index.js
 var HA1_VALUE_LIMIT = 15; // must match ChannelData.text[16] on the C side
 var LABEL_LIMIT = 7; // must match ChannelData.label[8] on the C side
 
@@ -104,15 +105,43 @@ function freshEnv() {
     lastSocket.onmessage({ data: JSON.stringify({ type: "auth_ok" }) });
   }
 
+  function subscriptionId(socket) {
+    for (var i = (socket || lastSocket).sent.length - 1; i >= 0; i--) {
+      if ((socket || lastSocket).sent[i].type === HA_SUBSCRIBE_COMMAND) {
+        return (socket || lastSocket).sent[i].id;
+      }
+    }
+    return null;
+  }
+
   function sendChannelEvent(channel, value, label) {
     var data = { channel: channel, value: value };
     if (label !== undefined) {
       data.label = label;
     }
     lastSocket.onmessage({
+      data: JSON.stringify({ id: subscriptionId(), type: "event", event: data }),
+    });
+  }
+
+  function sendInitialResult(channels) {
+    lastSocket.onmessage({
       data: JSON.stringify({
-        type: "event",
-        event: { event_type: "pebble_channel_update", data: data },
+        id: subscriptionId(),
+        type: "result",
+        success: true,
+        result: { channels: channels },
+      }),
+    });
+  }
+
+  function sendRejectedResult(error) {
+    lastSocket.onmessage({
+      data: JSON.stringify({
+        id: subscriptionId(),
+        type: "result",
+        success: false,
+        error: error || { code: "unknown_command" },
       }),
     });
   }
@@ -120,7 +149,10 @@ function freshEnv() {
   return {
     fire: fire,
     authenticate: authenticate,
+    subscriptionId: subscriptionId,
     sendChannelEvent: sendChannelEvent,
+    sendInitialResult: sendInitialResult,
+    sendRejectedResult: sendRejectedResult,
     sentAppMessages: sentAppMessages,
     scheduledTimeouts: scheduledTimeouts,
     getLastSocket: function () {
@@ -129,7 +161,7 @@ function freshEnv() {
   };
 }
 
-// --- Test 1: startup handshake sequencing (auth -> subscribe -> request-state) ---
+// --- Test 1: startup handshake sequencing (auth -> single subscribe command) ---
 (function testStartupSequencing() {
   var env = freshEnv();
   env.fire("ready");
@@ -142,19 +174,49 @@ function freshEnv() {
     socket.sent[0].type === "auth" && socket.sent[0].access_token === "testtoken",
     "responds to auth_required with the configured token"
   );
+  assert(socket.sent.length === 1, "sends nothing else before auth_ok, got " + socket.sent.length);
 
   socket.onmessage({ data: JSON.stringify({ type: "auth_ok" }) });
+  assert(socket.sent.length === 2, "sends exactly one more message after auth_ok, got " + socket.sent.length);
   assert(
-    socket.sent[1].type === "subscribe_events" && socket.sent[1].event_type === "pebble_channel_update",
-    "subscribes to pebble_channel_update after auth_ok"
-  );
-  assert(
-    socket.sent[2].type === "fire_event" && socket.sent[2].event_type === "pebble_request_state",
-    "requests current state after auth_ok"
+    socket.sent[1].type === HA_SUBSCRIBE_COMMAND && typeof socket.sent[1].id === "number",
+    "sends the subscribe_channels command with a request id, got " + JSON.stringify(socket.sent[1])
   );
 })();
 
-// --- Test 2: each of the 3 channels relays independently, value+label ---
+// --- Test 2: initial state arrives via the subscribe command's "result" reply ---
+(function testInitialStateViaResult() {
+  var env = freshEnv();
+  env.authenticate();
+
+  env.sendInitialResult([
+    { channel: 1, value: "72F", label: "Temp" },
+    { channel: 2, value: "Closed" }, // no label — channel keeps its default
+    { channel: 9, value: "ignored" }, // out of range, must not relay
+  ]);
+
+  assert(env.sentAppMessages.length === 2, "relayed 2 AppMessages from the initial result, got " + env.sentAppMessages.length);
+  assert(
+    env.sentAppMessages[0].HA1_VALUE === "72F" && env.sentAppMessages[0].HA1_LABEL === "Temp",
+    "channel 1 initial state relayed correctly, got " + JSON.stringify(env.sentAppMessages[0])
+  );
+  assert(
+    env.sentAppMessages[1].HA2_VALUE === "Closed" && !("HA2_LABEL" in env.sentAppMessages[1]),
+    "channel 2 initial state relayed without a label, got " + JSON.stringify(env.sentAppMessages[1])
+  );
+})();
+
+// --- Test 3: a rejected subscribe command (integration not installed) doesn't crash or relay ---
+(function testRejectedSubscribeCommand() {
+  var env = freshEnv();
+  env.authenticate();
+
+  env.sendRejectedResult({ code: "unknown_command", message: "Unknown command." });
+
+  assert(env.sentAppMessages.length === 0, "no AppMessage sent when the subscribe command is rejected");
+})();
+
+// --- Test 4: each of the 3 channels relays independently via push events, value+label ---
 (function testAllThreeChannelsRelay() {
   var env = freshEnv();
   env.authenticate();
@@ -178,7 +240,7 @@ function freshEnv() {
   );
 })();
 
-// --- Test 3: value-only update omits the label key entirely ---
+// --- Test 5: value-only push event omits the label key entirely ---
 (function testValueOnlyUpdate() {
   var env = freshEnv();
   env.authenticate();
@@ -191,7 +253,7 @@ function freshEnv() {
   assert(!("HA2_LABEL" in msg), "label key omitted entirely, got " + JSON.stringify(msg));
 })();
 
-// --- Test 4: long value/label get truncated to the C-side buffer sizes ---
+// --- Test 6: long value/label get truncated to the C-side buffer sizes ---
 (function testTruncation() {
   var env = freshEnv();
   env.authenticate();
@@ -211,7 +273,7 @@ function freshEnv() {
   );
 })();
 
-// --- Test 5: unknown channel numbers are ignored, not relayed ---
+// --- Test 7: unknown channel numbers are ignored, not relayed ---
 (function testUnknownChannelIgnored() {
   var env = freshEnv();
   env.authenticate();
@@ -223,7 +285,7 @@ function freshEnv() {
   assert(env.sentAppMessages.length === 0, "no AppMessage sent for out-of-range channels, got " + env.sentAppMessages.length);
 })();
 
-// --- Test 6: reconnect backoff doubles on repeated drops, resets after auth_ok ---
+// --- Test 8: reconnect backoff doubles on repeated drops, resets after auth_ok ---
 (function testReconnectBackoff() {
   var env = freshEnv();
   env.authenticate(); // haReconnectDelay reset to 2000 here
@@ -255,7 +317,7 @@ function freshEnv() {
   );
 })();
 
-// --- Test 7: webviewclosed filters HA_URL/HA_TOKEN out of the AppMessage
+// --- Test 9: webviewclosed filters HA_URL/HA_TOKEN out of the AppMessage
 // sent to the watch, but still reconnects using the new values ---
 (function testWebviewClosedFiltersAndReconnects() {
   var env = freshEnv();

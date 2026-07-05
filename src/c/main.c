@@ -1,6 +1,15 @@
 #include <pebble.h>
 
-#define NUM_CHANNELS 3
+#define MAX_SLOTS 8
+
+typedef enum {
+    CHANNEL_TIME,
+    CHANNEL_DATE,
+    CHANNEL_BATTERY,
+    CHANNEL_STEPS,
+    CHANNEL_HA_PLACEHOLDER,
+    NUM_CHANNELS,
+} ChannelIndex;
 
 typedef enum {
     CHANNEL_KIND_NUMERIC,
@@ -16,6 +25,7 @@ typedef enum {
 typedef struct {
     ChannelKind kind;
     ChannelStyle style;
+    char label[8];
     int32_t value;      // numeric value, or 0/1 for binary
     int32_t min;
     int32_t max;
@@ -24,22 +34,95 @@ typedef struct {
     char text[16];       // used when kind == CHANNEL_KIND_TEXT
 } ChannelData;
 
-static Window *s_main_window;
-static TextLayer *s_time_layer;
-static TextLayer *s_date_layer;
-static Layer *s_separator_layer;
-static TextLayer *s_channel_label_layers[NUM_CHANNELS];
-static Layer *s_channel_value_layers[NUM_CHANNELS];
+// A slot is a screen position from a layout template. Its size class
+// controls how the assigned channel is rendered (big centered value vs.
+// a label+value stat row) independent of which channel feeds it — any
+// channel can be assigned to any slot.
+typedef enum {
+    SLOT_SIZE_HERO,
+    SLOT_SIZE_MEDIUM,
+    SLOT_SIZE_SMALL,
+} SlotSizeClass;
 
-static char s_time_buffer[8];
-static char s_date_buffer[16];
+typedef struct {
+    GRect rect;
+    SlotSizeClass size_class;
+    ChannelIndex channel;
+} SlotSpec;
+
+typedef struct {
+    ChannelIndex channel_index;
+    SlotSizeClass size_class;
+} SlotRenderInfo;
+
+static Window *s_main_window;
+static Layer *s_separator_layer;
+static Layer *s_slot_layers[MAX_SLOTS];
+static int s_slot_count = 0;
 
 static ChannelData s_channels[NUM_CHANNELS];
 
-// Slots 0 and 1 are always-available local channels (battery, steps).
-// Slot 2 stands in for a Home Assistant-pushed channel until the pkjs
-// bridge exists.
-static const char *s_channel_labels[NUM_CHANNELS] = { "BATT", "STEPS", "CH3" };
+static void init_channels(void) {
+    s_channels[CHANNEL_TIME] = (ChannelData) {
+        .kind = CHANNEL_KIND_TEXT, .style = CHANNEL_STYLE_RAW, .label = "TIME",
+    };
+    s_channels[CHANNEL_DATE] = (ChannelData) {
+        .kind = CHANNEL_KIND_TEXT, .style = CHANNEL_STYLE_RAW, .label = "DATE",
+    };
+    s_channels[CHANNEL_BATTERY] = (ChannelData) {
+        .kind = CHANNEL_KIND_NUMERIC, .style = CHANNEL_STYLE_BAR, .label = "BATT",
+        .min = 0, .max = 100, .has_range = true,
+    };
+    s_channels[CHANNEL_STEPS] = (ChannelData) {
+        .kind = CHANNEL_KIND_NUMERIC, .style = CHANNEL_STYLE_RAW, .label = "STEPS",
+    };
+    // Stands in for a future Home Assistant-pushed channel until the pkjs bridge exists.
+    s_channels[CHANNEL_HA_PLACEHOLDER] = (ChannelData) {
+        .kind = CHANNEL_KIND_TEXT, .style = CHANNEL_STYLE_RAW, .label = "CH3", .text = "--",
+    };
+}
+
+// Template 0: reproduces the original fixed layout (hero clock, date,
+// 3 stat rows) expressed as channel-agnostic slots, so any channel can
+// later be reassigned to any of these positions.
+static int build_template_0(GRect bounds, SlotSpec *out) {
+    int n = 0;
+
+    const int hero_top = 24;
+    const int hero_height = 60;
+    out[n++] = (SlotSpec) {
+        GRect(0, hero_top, bounds.size.w, hero_height), SLOT_SIZE_HERO, CHANNEL_TIME,
+    };
+
+    const int date_top = hero_top + hero_height + 4;
+    const int date_height = 28;
+    out[n++] = (SlotSpec) {
+        GRect(0, date_top, bounds.size.w, date_height), SLOT_SIZE_MEDIUM, CHANNEL_DATE,
+    };
+
+    const int separator_top = date_top + date_height + 6;
+    const int stats_top = separator_top + 10;
+    const int bottom_margin = 6;
+    const int num_stats = 3;
+    const int available = bounds.size.h - stats_top - bottom_margin;
+    const int row_height = available / num_stats;
+    const ChannelIndex stat_channels[3] = { CHANNEL_BATTERY, CHANNEL_STEPS, CHANNEL_HA_PLACEHOLDER };
+
+    for (int i = 0; i < num_stats; i++) {
+        int row_top = stats_top + i * row_height;
+        out[n++] = (SlotSpec) {
+            GRect(0, row_top, bounds.size.w, row_height), SLOT_SIZE_SMALL, stat_channels[i],
+        };
+    }
+
+    return n;
+}
+
+static void mark_all_slots_dirty(void) {
+    for (int i = 0; i < s_slot_count; i++) {
+        layer_mark_dirty(s_slot_layers[i]);
+    }
+}
 
 static void separator_update_proc(Layer *layer, GContext *ctx) {
     GRect bounds = layer_get_bounds(layer);
@@ -74,7 +157,8 @@ static void draw_channel_bar(GContext *ctx, GRect bounds, ChannelData *ch) {
     }
 }
 
-static void draw_channel_text(GContext *ctx, GRect bounds, ChannelData *ch) {
+static void draw_channel_text_aligned(GContext *ctx, GRect bounds, ChannelData *ch,
+                                       GFont font, GTextAlignment alignment, GColor color) {
     char buffer[24];
     const char *text = buffer;
 
@@ -95,20 +179,45 @@ static void draw_channel_text(GContext *ctx, GRect bounds, ChannelData *ch) {
             break;
     }
 
-    graphics_context_set_text_color(ctx, GColorWhite);
-    graphics_draw_text(ctx, text, fonts_get_system_font(FONT_KEY_GOTHIC_18), bounds,
-                        GTextOverflowModeTrailingEllipsis, GTextAlignmentRight, NULL);
+    graphics_context_set_text_color(ctx, color);
+    graphics_draw_text(ctx, text, font, bounds, GTextOverflowModeTrailingEllipsis, alignment, NULL);
 }
 
-static void channel_value_update_proc(Layer *layer, GContext *ctx) {
-    int idx = *(int *)layer_get_data(layer);
-    ChannelData *ch = &s_channels[idx];
-    GRect bounds = layer_get_bounds(layer);
+static void draw_channel_small_row(GContext *ctx, GRect bounds, ChannelData *ch) {
+    int half = bounds.size.w / 2;
+    GRect label_rect = GRect(bounds.origin.x + 14, bounds.origin.y, half - 14, bounds.size.h);
+    GRect value_rect = GRect(bounds.origin.x + half, bounds.origin.y, half - 14, bounds.size.h);
+
+    graphics_context_set_text_color(ctx, GColorLightGray);
+    graphics_draw_text(ctx, ch->label, fonts_get_system_font(FONT_KEY_GOTHIC_18_BOLD), label_rect,
+                        GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
 
     if (ch->style == CHANNEL_STYLE_BAR && ch->kind == CHANNEL_KIND_NUMERIC && ch->has_range) {
-        draw_channel_bar(ctx, bounds, ch);
+        draw_channel_bar(ctx, value_rect, ch);
     } else {
-        draw_channel_text(ctx, bounds, ch);
+        draw_channel_text_aligned(ctx, value_rect, ch, fonts_get_system_font(FONT_KEY_GOTHIC_18),
+                                   GTextAlignmentRight, GColorWhite);
+    }
+}
+
+static void slot_update_proc(Layer *layer, GContext *ctx) {
+    SlotRenderInfo *info = layer_get_data(layer);
+    ChannelData *ch = &s_channels[info->channel_index];
+    GRect bounds = layer_get_bounds(layer);
+
+    switch (info->size_class) {
+        case SLOT_SIZE_HERO:
+            draw_channel_text_aligned(ctx, bounds, ch, fonts_get_system_font(FONT_KEY_BITHAM_42_BOLD),
+                                       GTextAlignmentCenter, GColorWhite);
+            break;
+        case SLOT_SIZE_MEDIUM:
+            draw_channel_text_aligned(ctx, bounds, ch, fonts_get_system_font(FONT_KEY_GOTHIC_24),
+                                       GTextAlignmentCenter, GColorLightGray);
+            break;
+        case SLOT_SIZE_SMALL:
+        default:
+            draw_channel_small_row(ctx, bounds, ch);
+            break;
     }
 }
 
@@ -119,20 +228,18 @@ static void update_time(void) {
         return;
     }
 
-    strftime(s_time_buffer, sizeof(s_time_buffer),
+    strftime(s_channels[CHANNEL_TIME].text, sizeof(s_channels[CHANNEL_TIME].text),
               clock_is_24h_style() ? "%H:%M" : "%I:%M", tick_time);
-    text_layer_set_text(s_time_layer, s_time_buffer);
+    strftime(s_channels[CHANNEL_DATE].text, sizeof(s_channels[CHANNEL_DATE].text),
+              "%a %d %b", tick_time);
 
-    strftime(s_date_buffer, sizeof(s_date_buffer), "%a %d %b", tick_time);
-    text_layer_set_text(s_date_layer, s_date_buffer);
+    mark_all_slots_dirty();
 }
 
 static void update_battery(void) {
     BatteryChargeState state = battery_state_service_peek();
-    s_channels[0].value = state.charge_percent;
-    if (s_channel_value_layers[0]) {
-        layer_mark_dirty(s_channel_value_layers[0]);
-    }
+    s_channels[CHANNEL_BATTERY].value = state.charge_percent;
+    mark_all_slots_dirty();
 }
 
 static void update_steps(void) {
@@ -142,23 +249,19 @@ static void update_steps(void) {
         health_service_metric_accessible(HealthMetricStepCount, start, end);
 
     if (mask & HealthServiceAccessibilityMaskAvailable) {
-        s_channels[1].kind = CHANNEL_KIND_NUMERIC;
-        s_channels[1].value = (int32_t)health_service_sum_today(HealthMetricStepCount);
+        s_channels[CHANNEL_STEPS].kind = CHANNEL_KIND_NUMERIC;
+        s_channels[CHANNEL_STEPS].value = (int32_t)health_service_sum_today(HealthMetricStepCount);
     } else {
-        s_channels[1].kind = CHANNEL_KIND_TEXT;
-        strncpy(s_channels[1].text, "N/A", sizeof(s_channels[1].text));
+        s_channels[CHANNEL_STEPS].kind = CHANNEL_KIND_TEXT;
+        strncpy(s_channels[CHANNEL_STEPS].text, "N/A", sizeof(s_channels[CHANNEL_STEPS].text));
     }
 
-    if (s_channel_value_layers[1]) {
-        layer_mark_dirty(s_channel_value_layers[1]);
-    }
+    mark_all_slots_dirty();
 }
 
 static void battery_callback(BatteryChargeState state) {
-    s_channels[0].value = state.charge_percent;
-    if (s_channel_value_layers[0]) {
-        layer_mark_dirty(s_channel_value_layers[0]);
-    }
+    s_channels[CHANNEL_BATTERY].value = state.charge_percent;
+    mark_all_slots_dirty();
 }
 
 static void tick_handler(struct tm *tick_time, TimeUnits units_changed) {
@@ -172,74 +275,26 @@ static void main_window_load(Window *window) {
 
     window_set_background_color(window, GColorBlack);
 
-    // Time
-    const int time_top = 24;
-    const int time_height = 60;
-    s_time_layer = text_layer_create(GRect(0, time_top, bounds.size.w, time_height));
-    text_layer_set_background_color(s_time_layer, GColorClear);
-    text_layer_set_text_color(s_time_layer, GColorWhite);
-    text_layer_set_font(s_time_layer, fonts_get_system_font(FONT_KEY_BITHAM_42_BOLD));
-    text_layer_set_text_alignment(s_time_layer, GTextAlignmentCenter);
-    layer_add_child(window_layer, text_layer_get_layer(s_time_layer));
+    init_channels();
 
-    // Date
-    const int date_top = time_top + time_height + 4;
-    const int date_height = 28;
-    s_date_layer = text_layer_create(GRect(0, date_top, bounds.size.w, date_height));
-    text_layer_set_background_color(s_date_layer, GColorClear);
-    text_layer_set_text_color(s_date_layer, GColorLightGray);
-    text_layer_set_font(s_date_layer, fonts_get_system_font(FONT_KEY_GOTHIC_24));
-    text_layer_set_text_alignment(s_date_layer, GTextAlignmentCenter);
-    layer_add_child(window_layer, text_layer_get_layer(s_date_layer));
+    SlotSpec specs[MAX_SLOTS];
+    s_slot_count = build_template_0(bounds, specs);
 
-    // Separator between clock and channels
-    const int separator_top = date_top + date_height + 6;
+    for (int i = 0; i < s_slot_count; i++) {
+        Layer *slot_layer = layer_create_with_data(specs[i].rect, sizeof(SlotRenderInfo));
+        SlotRenderInfo *info = layer_get_data(slot_layer);
+        info->channel_index = specs[i].channel;
+        info->size_class = specs[i].size_class;
+        layer_set_update_proc(slot_layer, slot_update_proc);
+        layer_add_child(window_layer, slot_layer);
+        s_slot_layers[i] = slot_layer;
+    }
+
+    // Divider between the date slot and the stat rows below it.
+    int separator_top = specs[1].rect.origin.y + specs[1].rect.size.h + 6;
     s_separator_layer = layer_create(GRect(10, separator_top, bounds.size.w - 20, 1));
     layer_set_update_proc(s_separator_layer, separator_update_proc);
     layer_add_child(window_layer, s_separator_layer);
-
-    // Channel data: battery is numeric with a 0-100 range, rendered as a bar.
-    // Steps is numeric with no fixed range (plain text). CH3 is a text
-    // placeholder standing in for a future HA-pushed channel.
-    s_channels[0] = (ChannelData) {
-        .kind = CHANNEL_KIND_NUMERIC, .style = CHANNEL_STYLE_BAR,
-        .value = 0, .min = 0, .max = 100, .has_range = true, .unit = "",
-    };
-    s_channels[1] = (ChannelData) {
-        .kind = CHANNEL_KIND_NUMERIC, .style = CHANNEL_STYLE_RAW,
-        .value = 0, .has_range = false, .unit = "",
-    };
-    s_channels[2] = (ChannelData) {
-        .kind = CHANNEL_KIND_TEXT, .style = CHANNEL_STYLE_RAW, .text = "--",
-    };
-
-    // Channel rows fill the remaining space above the bottom margin
-    const int channels_top = separator_top + 10;
-    const int bottom_margin = 6;
-    const int available = bounds.size.h - channels_top - bottom_margin;
-    const int row_height = available / NUM_CHANNELS;
-    const int label_width = bounds.size.w / 2 - 14;
-    const int value_width = bounds.size.w / 2 - 14;
-
-    for (int i = 0; i < NUM_CHANNELS; i++) {
-        int row_top = channels_top + i * row_height;
-
-        TextLayer *label_layer = text_layer_create(GRect(14, row_top, label_width, row_height));
-        text_layer_set_background_color(label_layer, GColorClear);
-        text_layer_set_text_color(label_layer, GColorLightGray);
-        text_layer_set_font(label_layer, fonts_get_system_font(FONT_KEY_GOTHIC_18_BOLD));
-        text_layer_set_text_alignment(label_layer, GTextAlignmentLeft);
-        text_layer_set_text(label_layer, s_channel_labels[i]);
-        layer_add_child(window_layer, text_layer_get_layer(label_layer));
-        s_channel_label_layers[i] = label_layer;
-
-        Layer *value_layer = layer_create_with_data(
-            GRect(bounds.size.w / 2, row_top, value_width, row_height), sizeof(int));
-        *(int *)layer_get_data(value_layer) = i;
-        layer_set_update_proc(value_layer, channel_value_update_proc);
-        layer_add_child(window_layer, value_layer);
-        s_channel_value_layers[i] = value_layer;
-    }
 
     update_time();
     update_battery();
@@ -247,14 +302,10 @@ static void main_window_load(Window *window) {
 }
 
 static void main_window_unload(Window *window) {
-    text_layer_destroy(s_time_layer);
-    text_layer_destroy(s_date_layer);
-    layer_destroy(s_separator_layer);
-
-    for (int i = 0; i < NUM_CHANNELS; i++) {
-        text_layer_destroy(s_channel_label_layers[i]);
-        layer_destroy(s_channel_value_layers[i]);
+    for (int i = 0; i < s_slot_count; i++) {
+        layer_destroy(s_slot_layers[i]);
     }
+    layer_destroy(s_separator_layer);
 }
 
 static void init(void) {

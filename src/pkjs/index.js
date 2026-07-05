@@ -28,8 +28,12 @@ Pebble.addEventListener("webviewclosed", function (e) {
 
   // clay.getSettings() also persists everything (incl. HA_URL/HA_TOKEN) to
   // localStorage as a side effect, which is what connectToHomeAssistant()
-  // reads from.
-  var settings = clay.getSettings(e.response);
+  // reads from. Pass `false` for raw, string-keyed settings (matching the
+  // messageKey names in config.js) — the default (`true`) converts keys to
+  // their numeric AppMessage IDs, which would break the name-based lookup
+  // below. Pebble.sendAppMessage() resolves string keys against
+  // package.json's messageKeys itself, so no manual conversion is needed.
+  var settings = clay.getSettings(e.response, false);
 
   var watchSettings = {};
   WATCH_SETTINGS_KEYS.forEach(function (key) {

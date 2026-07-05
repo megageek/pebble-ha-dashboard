@@ -83,6 +83,8 @@ The watchface can show up to 4 small colored dots inside one screen slot, **in a
 
 If your integration doesn't care about dot styling, it can simply never send `on_color`/`off_color`/`hide_when` — the watch has its own defaults (green="on"/red="off", always visible) and dot rendering works fine without any HA-side involvement.
 
+Dot **size** (small/medium/large) is also a pure watch/Clay-side setting, like slot/channel assignment — HA never sends or receives it and has no visibility into what size the user picked.
+
 ## Watch → HA: status reports (battery, health, device info)
 
 Separately from channel data (which flows HA → watch), the watch periodically reports its own status back to HA. The phone relays it over the same connection as a second custom command:

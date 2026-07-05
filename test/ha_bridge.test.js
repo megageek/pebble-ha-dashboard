@@ -383,6 +383,9 @@ function freshEnv() {
     SLOT_4_CHANNEL: 0,
     REPORT_ENABLE_BATTERY: true,
     REPORT_ENABLE_HEART_RATE: false, // Clay's toggle component -> raw JS boolean
+    DOT_GROUP_SLOT: 2,
+    DOT_0_CHANNEL: 7,
+    DOT_SIZE: 0,
     HA_URL: "http://new-ha.local:8123",
     HA_TOKEN: "newtoken",
   });
@@ -398,6 +401,11 @@ function freshEnv() {
     watchMsg.REPORT_ENABLE_BATTERY === 1 && watchMsg.REPORT_ENABLE_HEART_RATE === 0,
     "Clay's boolean toggle values converted to 1/0 ints, got " +
       JSON.stringify({ b: watchMsg.REPORT_ENABLE_BATTERY, hr: watchMsg.REPORT_ENABLE_HEART_RATE })
+  );
+  assert(
+    watchMsg.DOT_GROUP_SLOT === 2 && watchMsg.DOT_0_CHANNEL === 7 && watchMsg.DOT_SIZE === 0,
+    "dot-group config forwarded to the watch, got " +
+      JSON.stringify({ slot: watchMsg.DOT_GROUP_SLOT, ch: watchMsg.DOT_0_CHANNEL, size: watchMsg.DOT_SIZE })
   );
 
   var secondSocket = env.getLastSocket();

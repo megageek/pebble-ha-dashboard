@@ -9,11 +9,10 @@
 #define PERSIST_KEY_REPORT_ENABLED_BASE 200  // group i -> PERSIST_KEY_REPORT_ENABLED_BASE + i
 
 #define MAX_DOTS 4
-#define DOT_DIAMETER 12
-#define DOT_SPACING 8
 #define DOT_AREA_MARGIN 8  // gap between the dot cluster and the slot's normal content
 #define PERSIST_KEY_DOT_GROUP_SLOT 299  // which slot (0..NUM_CONFIGURABLE_SLOTS-1) also shows dots, -1 = none
 #define PERSIST_KEY_DOT_CHANNEL_BASE 300  // dot i -> PERSIST_KEY_DOT_CHANNEL_BASE + i
+#define PERSIST_KEY_DOT_SIZE 326
 #define PERSIST_KEY_CHARGE_ON_COLOR 320
 #define PERSIST_KEY_CHARGE_OFF_COLOR 321
 #define PERSIST_KEY_CHARGE_HIDE_WHEN 322
@@ -123,6 +122,19 @@ static int s_slot_channel_override[NUM_CONFIGURABLE_SLOTS];
 // no channel assigned to that dot position.
 static int s_dot_group_slot = -1;  // which of the 5 configurable slots also shows dots; -1 = none
 static int s_dot_channels[MAX_DOTS];
+
+// Dot size is user-configurable (Clay), not a fixed constant — defaults to
+// the largest, which was the only size before this option existed.
+typedef enum {
+    DOT_SIZE_SMALL,
+    DOT_SIZE_MEDIUM,
+    DOT_SIZE_LARGE,
+    NUM_DOT_SIZES,
+} DotSizeOption;
+
+static const int DOT_DIAMETERS[NUM_DOT_SIZES] = { 6, 9, 12 };
+static const int DOT_SPACINGS[NUM_DOT_SIZES] = { 5, 6, 8 };
+static int s_dot_size = DOT_SIZE_LARGE;
 
 // Groups of outbound status-report fields (see "Outbound reporting" below),
 // each independently toggleable via Clay config.
@@ -337,6 +349,14 @@ static void load_config(void) {
         }
     }
 
+    s_dot_size = DOT_SIZE_LARGE;
+    if (persist_exists(PERSIST_KEY_DOT_SIZE)) {
+        int stored = persist_read_int(PERSIST_KEY_DOT_SIZE);
+        if (stored >= 0 && stored < NUM_DOT_SIZES) {
+            s_dot_size = stored;
+        }
+    }
+
     // Local channel dot colors/hide-when; defaults already set in
     // init_channels(), only overridden here if a Clay save persisted one.
     if (persist_exists(PERSIST_KEY_CHARGE_ON_COLOR)) {
@@ -525,7 +545,9 @@ static void draw_dot_group(GContext *ctx, GRect bounds) {
         return;
     }
 
-    int total_width = assigned * DOT_DIAMETER + (assigned - 1) * DOT_SPACING;
+    int diameter = DOT_DIAMETERS[s_dot_size];
+    int spacing = DOT_SPACINGS[s_dot_size];
+    int total_width = assigned * diameter + (assigned - 1) * spacing;
     int start_x = bounds.origin.x + (bounds.size.w - total_width) / 2;
     int center_y = bounds.origin.y + bounds.size.h / 2;
 
@@ -542,10 +564,10 @@ static void draw_dot_group(GContext *ctx, GRect bounds) {
         bool hidden = (ch->hide_when == 1 && on) || (ch->hide_when == 2 && !on);
 
         if (!hidden) {
-            int cx = start_x + slot_i * (DOT_DIAMETER + DOT_SPACING) + DOT_DIAMETER / 2;
+            int cx = start_x + slot_i * (diameter + spacing) + diameter / 2;
             GColor color = color_from_name(on ? ch->on_color : ch->off_color);
             graphics_context_set_fill_color(ctx, color);
-            graphics_fill_circle(ctx, GPoint(cx, center_y), DOT_DIAMETER / 2);
+            graphics_fill_circle(ctx, GPoint(cx, center_y), diameter / 2);
         }
         slot_i++;
     }
@@ -563,7 +585,9 @@ static void slot_update_proc(Layer *layer, GContext *ctx) {
     if (info->slot_index == s_dot_group_slot) {
         int assigned = count_assigned_dots();
         if (assigned > 0) {
-            int dot_area_width = assigned * DOT_DIAMETER + (assigned - 1) * DOT_SPACING + DOT_AREA_MARGIN;
+            int diameter = DOT_DIAMETERS[s_dot_size];
+            int spacing = DOT_SPACINGS[s_dot_size];
+            int dot_area_width = assigned * diameter + (assigned - 1) * spacing + DOT_AREA_MARGIN;
             content_bounds.size.w -= dot_area_width;
             GRect dot_bounds = GRect(bounds.origin.x + bounds.size.w - dot_area_width, bounds.origin.y,
                                       dot_area_width, bounds.size.h);
@@ -1060,6 +1084,16 @@ static void inbox_received_callback(DictionaryIterator *iterator, void *context)
         if (value == -1 || (value >= 0 && value < NUM_CHANNELS)) {
             s_dot_channels[i] = value;
             persist_write_int(PERSIST_KEY_DOT_CHANNEL_BASE + i, value);
+            dot_config_changed = true;
+        }
+    }
+
+    Tuple *dot_size_tuple = dict_find(iterator, MESSAGE_KEY_DOT_SIZE);
+    if (dot_size_tuple) {
+        int value = (int)dot_size_tuple->value->int32;
+        if (value >= 0 && value < NUM_DOT_SIZES) {
+            s_dot_size = value;
+            persist_write_int(PERSIST_KEY_DOT_SIZE, value);
             dot_config_changed = true;
         }
     }

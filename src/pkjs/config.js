@@ -161,6 +161,17 @@ module.exports = [
   dotChannelSelect(2),
   dotChannelSelect(3),
   {
+    type: "select",
+    messageKey: "DOT_SIZE",
+    label: "Dot size",
+    defaultValue: 2,
+    options: [
+      { label: "Small", value: 0 },
+      { label: "Medium", value: 1 },
+      { label: "Large", value: 2 },
+    ],
+  },
+  {
     type: "text",
     defaultValue:
       "Colors for the two local dot-capable channels below. HA channels " +

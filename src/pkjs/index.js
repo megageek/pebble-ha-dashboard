@@ -83,6 +83,9 @@ var haNextRequestId = 1;
 // messages can be matched to it (HA multiplexes everything over one
 // connection, keyed by request id).
 var haSubscriptionId = null;
+// True only between auth_ok and the connection being replaced/dropped —
+// gates outbound status reports so they're never sent to a half-open socket.
+var haAuthenticated = false;
 
 function getHaConfig() {
   var settings = {};
@@ -133,6 +136,35 @@ function sendHaChannelToWatch(channel, value, label) {
   );
 }
 
+function reportStatusToHomeAssistant(payload) {
+  if (!haAuthenticated || !haSocket) {
+    return; // no connection yet; the next periodic report from the watch will retry
+  }
+
+  var status = {};
+  Object.keys(payload || {}).forEach(function (key) {
+    if (key.indexOf("REPORT_") === 0) {
+      status[key.substring("REPORT_".length).toLowerCase()] = payload[key];
+    }
+  });
+
+  if (Object.keys(status).length === 0) {
+    return;
+  }
+
+  haSocket.send(
+    JSON.stringify({
+      id: haNextRequestId++,
+      type: "pebble_dashboard/report_status",
+      status: status,
+    })
+  );
+}
+
+Pebble.addEventListener("appmessage", function (e) {
+  reportStatusToHomeAssistant(e.payload);
+});
+
 function connectToHomeAssistant() {
   var config = getHaConfig();
   if (!config.url || !config.token) {
@@ -145,6 +177,7 @@ function connectToHomeAssistant() {
     haSocket.close();
   }
   haSubscriptionId = null;
+  haAuthenticated = false;
 
   var wsUrl = config.url.replace(/\/+$/, "") + "/api/websocket";
   console.log("Connecting to Home Assistant: " + wsUrl);
@@ -164,6 +197,7 @@ function connectToHomeAssistant() {
     } else if (message.type === "auth_ok") {
       console.log("Home Assistant auth succeeded");
       haReconnectDelay = RECONNECT_BASE_DELAY_MS;
+      haAuthenticated = true;
       haSubscriptionId = haNextRequestId++;
       // One command both fetches current state (in the "result" reply
       // below) and subscribes to future changes ("event" messages tagged
@@ -196,6 +230,7 @@ function connectToHomeAssistant() {
 
   haSocket.onclose = function () {
     console.log("Home Assistant socket closed");
+    haAuthenticated = false;
     scheduleHaReconnect();
   };
 }

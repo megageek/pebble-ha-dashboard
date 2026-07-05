@@ -135,6 +135,10 @@ function freshEnv() {
     });
   }
 
+  function sendAppMessageFromWatch(payload) {
+    fire("appmessage", { payload: payload });
+  }
+
   function sendRejectedResult(error) {
     lastSocket.onmessage({
       data: JSON.stringify({
@@ -153,6 +157,7 @@ function freshEnv() {
     sendChannelEvent: sendChannelEvent,
     sendInitialResult: sendInitialResult,
     sendRejectedResult: sendRejectedResult,
+    sendAppMessageFromWatch: sendAppMessageFromWatch,
     sentAppMessages: sentAppMessages,
     scheduledTimeouts: scheduledTimeouts,
     getLastSocket: function () {
@@ -351,6 +356,59 @@ function freshEnv() {
     secondSocket !== firstSocket && secondSocket.url === "http://new-ha.local:8123/api/websocket",
     "webviewclosed reconnected using the newly saved URL, got " + secondSocket.url
   );
+})();
+
+// --- Test 10: a watch status report (via appmessage) relays as
+// pebble_dashboard/report_status with lowercased, un-prefixed keys ---
+(function testStatusReportRelay() {
+  var env = freshEnv();
+  env.authenticate();
+  var socket = env.getLastSocket();
+  var sentBeforeReport = socket.sent.length;
+
+  env.sendAppMessageFromWatch({
+    REPORT_BATTERY_PERCENT: 87,
+    REPORT_BATTERY_CHARGING: 0,
+    REPORT_STEPS: 4213,
+    REPORT_HEART_RATE_BPM: 72,
+  });
+
+  assert(socket.sent.length === sentBeforeReport + 1, "sent exactly one report_status command");
+  var reportMsg = socket.sent[socket.sent.length - 1];
+  assert(
+    reportMsg.type === "pebble_dashboard/report_status" && typeof reportMsg.id === "number",
+    "report has the right command type and a request id, got " + JSON.stringify(reportMsg)
+  );
+  assert(
+    reportMsg.status.battery_percent === 87 &&
+      reportMsg.status.battery_charging === 0 &&
+      reportMsg.status.steps === 4213 &&
+      reportMsg.status.heart_rate_bpm === 72,
+    "status fields lowercased/un-prefixed correctly, got " + JSON.stringify(reportMsg.status)
+  );
+})();
+
+// --- Test 11: status reports are dropped (not queued) if not yet authenticated ---
+(function testStatusReportDroppedBeforeAuth() {
+  var env = freshEnv();
+  env.fire("ready"); // socket opened, but no auth_ok yet
+  var socket = env.getLastSocket();
+
+  env.sendAppMessageFromWatch({ REPORT_BATTERY_PERCENT: 50 });
+
+  assert(socket.sent.length === 0, "nothing sent to HA before authentication completes, got " + socket.sent.length);
+})();
+
+// --- Test 12: a payload with no REPORT_* keys sends nothing ---
+(function testEmptyReportSendsNothing() {
+  var env = freshEnv();
+  env.authenticate();
+  var socket = env.getLastSocket();
+  var sentBeforeReport = socket.sent.length;
+
+  env.sendAppMessageFromWatch({});
+
+  assert(socket.sent.length === sentBeforeReport, "no report_status command sent for an empty payload");
 })();
 
 if (failures > 0) {

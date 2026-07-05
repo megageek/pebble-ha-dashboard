@@ -316,6 +316,109 @@ static void slot_update_proc(Layer *layer, GContext *ctx) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Outbound reporting: watch -> phone -> Home Assistant
+//
+// The watch reports its own status back out via AppMessage; pkjs relays it
+// to HA over the same WebSocket connection used to receive channel data
+// (see HA_INTEGRATION_SPEC.md). Every metric here is read from a service the
+// watchface already touches for its own display (battery, steps) or is a
+// cheap additional read at the same MINUTE_UNIT cadence — nothing here adds
+// a new wake-up source, except the heart rate sample-period request, which
+// has a real, acknowledged battery cost.
+// ---------------------------------------------------------------------------
+
+static void write_health_metric_if_available(DictionaryIterator *iter, uint32_t key,
+                                              HealthMetric metric, time_t start, time_t end) {
+    HealthServiceAccessibilityMask mask = health_service_metric_accessible(metric, start, end);
+    if (mask & HealthServiceAccessibilityMaskAvailable) {
+        HealthValue value = health_service_sum(metric, start, end);
+        dict_write_int32(iter, key, (int32_t)value);
+    }
+}
+
+static void send_status_report(void) {
+    DictionaryIterator *iter;
+    if (app_message_outbox_begin(&iter) != APP_MSG_OK) {
+        return;  // outbox busy; the next periodic call will try again
+    }
+
+    BatteryChargeState battery = battery_state_service_peek();
+    dict_write_int32(iter, MESSAGE_KEY_REPORT_BATTERY_PERCENT, battery.charge_percent);
+    dict_write_int32(iter, MESSAGE_KEY_REPORT_BATTERY_CHARGING, battery.is_charging ? 1 : 0);
+    dict_write_int32(iter, MESSAGE_KEY_REPORT_CONNECTED,
+                      connection_service_peek_pebble_app_connection() ? 1 : 0);
+
+    time_t day_start = time_start_of_today();
+    time_t now = time(NULL);
+
+    write_health_metric_if_available(iter, MESSAGE_KEY_REPORT_STEPS, HealthMetricStepCount, day_start, now);
+    write_health_metric_if_available(iter, MESSAGE_KEY_REPORT_ACTIVE_SECONDS, HealthMetricActiveSeconds, day_start, now);
+    write_health_metric_if_available(iter, MESSAGE_KEY_REPORT_DISTANCE_METERS, HealthMetricWalkedDistanceMeters, day_start, now);
+    write_health_metric_if_available(iter, MESSAGE_KEY_REPORT_ACTIVE_KCAL, HealthMetricActiveKCalories, day_start, now);
+    write_health_metric_if_available(iter, MESSAGE_KEY_REPORT_RESTING_KCAL, HealthMetricRestingKCalories, day_start, now);
+    write_health_metric_if_available(iter, MESSAGE_KEY_REPORT_SLEEP_SECONDS, HealthMetricSleepSeconds, day_start, now);
+    write_health_metric_if_available(iter, MESSAGE_KEY_REPORT_SLEEP_RESTFUL_SECONDS, HealthMetricSleepRestfulSeconds, day_start, now);
+
+    // Heart rate is an instantaneous reading, not a daily sum — accessibility
+    // is checked for "right now", and health_service_peek_current_value()
+    // (not _sum_today()) returns the latest sample.
+    HealthServiceAccessibilityMask hr_mask = health_service_metric_accessible(HealthMetricHeartRateBPM, now, now);
+    if (hr_mask & HealthServiceAccessibilityMaskAvailable) {
+        HealthValue hr = health_service_peek_current_value(HealthMetricHeartRateBPM);
+        dict_write_int32(iter, MESSAGE_KEY_REPORT_HEART_RATE_BPM, (int32_t)hr);
+    }
+
+    app_message_outbox_send();
+}
+
+// Requesting fresher heart rate samples has a real battery cost, so the
+// elevated sample rate HA asked us to keep to a minute (matching our
+// existing tick cadence) rather than anything more aggressive — and it
+// expires on its own, so it's renewed every tick rather than requested once.
+static void request_heart_rate_updates(void) {
+    health_service_set_heart_rate_sample_period(60);
+}
+
+static const char *watch_model_name(void) {
+    switch (watch_info_get_model()) {
+        case WATCH_INFO_MODEL_PEBBLE_TIME_2: return "Pebble Time 2";
+        case WATCH_INFO_MODEL_COREDEVICES_PT2: return "Pebble Time 2 (Core Devices)";
+        default: return "Unknown";
+    }
+}
+
+static const char *watch_color_name(void) {
+    switch (watch_info_get_color()) {
+        case WATCH_INFO_COLOR_PEBBLE_TIME_2_BLACK: return "Black";
+        case WATCH_INFO_COLOR_PEBBLE_TIME_2_SILVER: return "Silver";
+        case WATCH_INFO_COLOR_PEBBLE_TIME_2_GOLD: return "Gold";
+        case WATCH_INFO_COLOR_COREDEVICES_PT2_BLACK_GREY: return "Black/Grey";
+        case WATCH_INFO_COLOR_COREDEVICES_PT2_BLACK_RED: return "Black/Red";
+        case WATCH_INFO_COLOR_COREDEVICES_PT2_SILVER_BLUE: return "Silver/Blue";
+        case WATCH_INFO_COLOR_COREDEVICES_PT2_SILVER_GREY: return "Silver/Grey";
+        default: return "Unknown";
+    }
+}
+
+// Static device info, sent once at startup rather than on every tick.
+static void send_device_info(void) {
+    DictionaryIterator *iter;
+    if (app_message_outbox_begin(&iter) != APP_MSG_OK) {
+        return;
+    }
+
+    WatchInfoVersion fw = watch_info_get_firmware_version();
+    char fw_buffer[16];
+    snprintf(fw_buffer, sizeof(fw_buffer), "%d.%d.%d", fw.major, fw.minor, fw.patch);
+
+    dict_write_cstring(iter, MESSAGE_KEY_REPORT_MODEL, watch_model_name());
+    dict_write_cstring(iter, MESSAGE_KEY_REPORT_FIRMWARE, fw_buffer);
+    dict_write_cstring(iter, MESSAGE_KEY_REPORT_COLOR, watch_color_name());
+
+    app_message_outbox_send();
+}
+
 static void update_time(void) {
     time_t temp = time(NULL);
     struct tm *tick_time = localtime(&temp);
@@ -357,11 +460,14 @@ static void update_steps(void) {
 static void battery_callback(BatteryChargeState state) {
     s_channels[CHANNEL_BATTERY].value = state.charge_percent;
     mark_all_slots_dirty();
+    send_status_report();
 }
 
 static void tick_handler(struct tm *tick_time, TimeUnits units_changed) {
     update_time();
     update_steps();
+    request_heart_rate_updates();
+    send_status_report();
 }
 
 // Builds slot layers for the active template + config overrides. Safe
@@ -515,6 +621,10 @@ static void init(void) {
 
     app_message_register_inbox_received(inbox_received_callback);
     app_message_open(app_message_inbox_size_maximum(), app_message_outbox_size_maximum());
+
+    request_heart_rate_updates();
+    send_device_info();
+    send_status_report();
 }
 
 static void deinit(void) {

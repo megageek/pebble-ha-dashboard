@@ -20,6 +20,9 @@
     "watchapp": {
       "watchface": true
     },
+    "capabilities": [
+      "health"
+    ],
     "messageKeys": [
       "TEMPLATE_INDEX",
       "SLOT_0_CHANNEL",
@@ -32,7 +35,21 @@
       "HA2_VALUE",
       "HA2_LABEL",
       "HA3_VALUE",
-      "HA3_LABEL"
+      "HA3_LABEL",
+      "REPORT_BATTERY_PERCENT",
+      "REPORT_BATTERY_CHARGING",
+      "REPORT_CONNECTED",
+      "REPORT_STEPS",
+      "REPORT_ACTIVE_SECONDS",
+      "REPORT_DISTANCE_METERS",
+      "REPORT_ACTIVE_KCAL",
+      "REPORT_RESTING_KCAL",
+      "REPORT_SLEEP_SECONDS",
+      "REPORT_SLEEP_RESTFUL_SECONDS",
+      "REPORT_HEART_RATE_BPM",
+      "REPORT_MODEL",
+      "REPORT_FIRMWARE",
+      "REPORT_COLOR"
     ],
     "resources": {
       "media": []

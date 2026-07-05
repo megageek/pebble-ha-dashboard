@@ -62,6 +62,11 @@ Pebble.addEventListener("webviewclosed", function (e) {
 // ---------------------------------------------------------------------------
 
 var HA_EVENT_TYPE = "pebble_channel_update";
+// Fired right after every successful auth (startup AND reconnect). The
+// HA-side automation should respond by re-publishing pebble_channel_update
+// for every channel it manages, so the watch shows real data immediately
+// instead of sitting on placeholders until the next organic state change.
+var HA_REQUEST_STATE_EVENT_TYPE = "pebble_request_state";
 var NUM_HA_CHANNELS = 3;
 var RECONNECT_BASE_DELAY_MS = 2000;
 var RECONNECT_MAX_DELAY_MS = 30000;
@@ -155,6 +160,17 @@ function connectToHomeAssistant() {
           id: haNextRequestId++,
           type: "subscribe_events",
           event_type: HA_EVENT_TYPE,
+        })
+      );
+      // Ask for the current state of every channel right away — don't make
+      // the watch wait on placeholders until something happens to change.
+      // Requires the token's user to be an admin: HA's fire_event WS command
+      // is admin-only.
+      haSocket.send(
+        JSON.stringify({
+          id: haNextRequestId++,
+          type: "fire_event",
+          event_type: HA_REQUEST_STATE_EVENT_TYPE,
         })
       );
     } else if (message.type === "auth_invalid") {

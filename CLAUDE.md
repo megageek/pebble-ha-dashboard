@@ -34,9 +34,21 @@ There is no separate lint/test suite — correctness is verified by building, ru
 
 ## Architecture: local channels vs. remote (HA) channels
 
-Not every channel comes from Home Assistant. **Battery level and step count are local channels** — read directly from on-watch services (`battery_state_service_peek()`/`battery_state_service_subscribe()`, and `health_service_sum_today(HealthMetricStepCount)` gated by `health_service_metric_accessible()`) with no phone or network round-trip at all. They sit in the **same selectable channel pool** as HA channels: from the config/slot-mapping point of view a display slot doesn't care whether the channel behind it is "local" or "remote", only that it has a label + value to render. Internally the two sources just update the same `TextLayer` widgets through different code paths — local channels refresh from `tick_handler` (and a `battery_state_service_subscribe` callback for instant charge changes), remote HA channels refresh from `inbox_received_callback` when pkjs relays a push (see below).
+Not every channel comes from Home Assistant. **Battery level and step count are local channels** — read directly from on-watch services (`battery_state_service_peek()`/`battery_state_service_subscribe()`, and `health_service_sum_today(HealthMetricStepCount)` gated by `health_service_metric_accessible()`) with no phone or network round-trip at all. They sit in the **same selectable channel pool** as HA channels: from the config/slot-mapping point of view a display slot doesn't care whether the channel behind it is "local" or "remote", only that it has a `ChannelData` (see below) to render. Local channels refresh from `tick_handler` (and a `battery_state_service_subscribe` callback for instant charge changes); remote HA channels will refresh from `inbox_received_callback` when pkjs relays a push (see the next section).
 
-`src/c/main.c` currently wires slot 0 → `BATT`, slot 1 → `STEPS` (both local, real data, no capability flags needed in `package.json`), and slot 2 → `CH3` (static `--` placeholder standing in for a future HA-pushed channel). This 0/1-local, 2-remote split is hardcoded for now; once the Clay config page exists, slot→channel assignment (including whether a slot points at a local or remote channel) becomes user-configurable rather than fixed by array index.
+`src/c/main.c` currently wires slot 0 → `BATT`, slot 1 → `STEPS` (both local, real data, no capability flags needed in `package.json`), and slot 2 → `CH3` (static placeholder standing in for a future HA-pushed channel). This 0/1-local, 2-remote split is hardcoded for now; once the Clay config page exists, slot→channel assignment (including whether a slot points at a local or remote channel) becomes user-configurable rather than fixed by array index.
+
+### Channel value model: kind, style, unit, range
+
+Each slot's value is a small tagged struct (`ChannelData` in `src/c/main.c`), not a plain string, because channels vary in shape:
+
+- **`kind`** — `CHANNEL_KIND_NUMERIC`, `CHANNEL_KIND_TEXT`, or `CHANNEL_KIND_BINARY`. Determines what the raw `value`/`text` field means (a number, a short string, or 0/1).
+- **`unit`** — optional suffix for numeric channels (e.g. `"%"`), appended when rendered as text. Empty string means no unit.
+- **`min`/`max`/`has_range`** — a numeric channel may declare a range for context/validation even if it's still shown as text (e.g. a temperature with a plausible range but no bar).
+- **`style`** — `CHANNEL_STYLE_RAW` or `CHANNEL_STYLE_BAR`, an **explicit, independent choice** from whether a range exists. A ranged numeric channel still defaults to text unless `style` is set to `BAR`. This is deliberate: range and rendering style are decoupled so a future Clay config page can let the user pick "show as bar" per slot without that decision being baked into the data source. Bar rendering only applies when `kind == NUMERIC && has_range`; anything else falls back to text regardless of `style`.
+- Binary channels render as `"ON"`/`"OFF"` text today; a future pass can add an icon/dot style once a real binary source (e.g. an HA switch entity) exists to test against.
+
+Each channel's value area is a plain `Layer` (not a `TextLayer`) with a custom `update_proc` (`channel_value_update_proc`) that reads the slot index out of the layer's own data block (`layer_create_with_data`/`layer_get_data`) and draws either `draw_channel_bar()` or `draw_channel_text()` based on `kind`/`style`/`has_range`. All bar math is integer-only (`(value - min) * width / range`), consistent with the skill's no-floating-point rule.
 
 ## Architecture: Home Assistant data flow (push, channel-based)
 

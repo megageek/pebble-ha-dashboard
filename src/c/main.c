@@ -1,6 +1,10 @@
 #include <pebble.h>
 
 #define MAX_SLOTS 8
+#define NUM_CONFIGURABLE_SLOTS 5  // must match the SLOT_n_CHANNEL messageKeys in package.json
+
+#define PERSIST_KEY_TEMPLATE 100
+#define PERSIST_KEY_SLOT_BASE 101  // slot i -> PERSIST_KEY_SLOT_BASE + i
 
 typedef enum {
     CHANNEL_TIME,
@@ -47,7 +51,7 @@ typedef enum {
 typedef struct {
     GRect rect;
     SlotSizeClass size_class;
-    ChannelIndex channel;
+    ChannelIndex channel;  // default assignment; overridable per-slot by Clay config
 } SlotSpec;
 
 typedef struct {
@@ -61,6 +65,10 @@ static Layer *s_slot_layers[MAX_SLOTS];
 static int s_slot_count = 0;
 
 static ChannelData s_channels[NUM_CHANNELS];
+
+static int s_active_template = 0;
+// -1 means "use the template's default channel for this slot".
+static int s_slot_channel_override[NUM_CONFIGURABLE_SLOTS];
 
 static void init_channels(void) {
     s_channels[CHANNEL_TIME] = (ChannelData) {
@@ -154,10 +162,30 @@ static int build_template_1(GRect bounds, SlotSpec *out) {
 
 typedef int (*TemplateBuilder)(GRect bounds, SlotSpec *out);
 static const TemplateBuilder s_templates[] = { build_template_0, build_template_1 };
+#define NUM_TEMPLATES ((int)(sizeof(s_templates) / sizeof(s_templates[0])))
 
-// Which template is active — a compile-time constant until the Clay
-// config page can offer this as a runtime choice.
-#define ACTIVE_TEMPLATE 0
+// Loads template choice and per-slot channel overrides persisted by a
+// previous Clay config save, falling back to defaults (template 0, no
+// overrides) on first run or if a stored value is out of range.
+static void load_config(void) {
+    s_active_template = 0;
+    if (persist_exists(PERSIST_KEY_TEMPLATE)) {
+        int stored = persist_read_int(PERSIST_KEY_TEMPLATE);
+        if (stored >= 0 && stored < NUM_TEMPLATES) {
+            s_active_template = stored;
+        }
+    }
+
+    for (int i = 0; i < NUM_CONFIGURABLE_SLOTS; i++) {
+        s_slot_channel_override[i] = -1;
+        if (persist_exists(PERSIST_KEY_SLOT_BASE + i)) {
+            int stored = persist_read_int(PERSIST_KEY_SLOT_BASE + i);
+            if (stored >= 0 && stored < NUM_CHANNELS) {
+                s_slot_channel_override[i] = stored;
+            }
+        }
+    }
+}
 
 static void mark_all_slots_dirty(void) {
     for (int i = 0; i < s_slot_count; i++) {
@@ -325,21 +353,21 @@ static void tick_handler(struct tm *tick_time, TimeUnits units_changed) {
     update_steps();
 }
 
-static void main_window_load(Window *window) {
-    Layer *window_layer = window_get_root_layer(window);
-    GRect bounds = layer_get_bounds(window_layer);
-
-    window_set_background_color(window, GColorBlack);
-
-    init_channels();
-
+// Builds slot layers for the active template + config overrides. Safe
+// to call again after destroy_active_layout() when config changes.
+static void load_active_layout(Layer *window_layer, GRect bounds) {
     SlotSpec specs[MAX_SLOTS];
-    s_slot_count = s_templates[ACTIVE_TEMPLATE](bounds, specs);
+    s_slot_count = s_templates[s_active_template](bounds, specs);
 
     for (int i = 0; i < s_slot_count; i++) {
+        ChannelIndex channel = specs[i].channel;
+        if (i < NUM_CONFIGURABLE_SLOTS && s_slot_channel_override[i] >= 0) {
+            channel = (ChannelIndex)s_slot_channel_override[i];
+        }
+
         Layer *slot_layer = layer_create_with_data(specs[i].rect, sizeof(SlotRenderInfo));
         SlotRenderInfo *info = layer_get_data(slot_layer);
-        info->channel_index = specs[i].channel;
+        info->channel_index = channel;
         info->size_class = specs[i].size_class;
         layer_set_update_proc(slot_layer, slot_update_proc);
         layer_add_child(window_layer, slot_layer);
@@ -351,6 +379,74 @@ static void main_window_load(Window *window) {
     s_separator_layer = layer_create(GRect(10, separator_top, bounds.size.w - 20, 1));
     layer_set_update_proc(s_separator_layer, separator_update_proc);
     layer_add_child(window_layer, s_separator_layer);
+}
+
+static void destroy_active_layout(void) {
+    for (int i = 0; i < s_slot_count; i++) {
+        layer_destroy(s_slot_layers[i]);
+        s_slot_layers[i] = NULL;
+    }
+    s_slot_count = 0;
+
+    if (s_separator_layer) {
+        layer_destroy(s_separator_layer);
+        s_separator_layer = NULL;
+    }
+}
+
+static void inbox_received_callback(DictionaryIterator *iterator, void *context) {
+    bool layout_changed = false;
+
+    Tuple *template_tuple = dict_find(iterator, MESSAGE_KEY_TEMPLATE_INDEX);
+    if (template_tuple) {
+        int value = (int)template_tuple->value->int32;
+        if (value >= 0 && value < NUM_TEMPLATES) {
+            s_active_template = value;
+            persist_write_int(PERSIST_KEY_TEMPLATE, value);
+            layout_changed = true;
+        }
+    }
+
+    const uint32_t slot_keys[NUM_CONFIGURABLE_SLOTS] = {
+        MESSAGE_KEY_SLOT_0_CHANNEL, MESSAGE_KEY_SLOT_1_CHANNEL, MESSAGE_KEY_SLOT_2_CHANNEL,
+        MESSAGE_KEY_SLOT_3_CHANNEL, MESSAGE_KEY_SLOT_4_CHANNEL,
+    };
+    for (int i = 0; i < NUM_CONFIGURABLE_SLOTS; i++) {
+        Tuple *tuple = dict_find(iterator, slot_keys[i]);
+        if (!tuple) {
+            continue;
+        }
+        int value = (int)tuple->value->int32;
+        if (value >= 0 && value < NUM_CHANNELS) {
+            s_slot_channel_override[i] = value;
+            persist_write_int(PERSIST_KEY_SLOT_BASE + i, value);
+            layout_changed = true;
+        }
+    }
+
+    if (!layout_changed) {
+        return;
+    }
+
+    Layer *window_layer = window_get_root_layer(s_main_window);
+    GRect bounds = layer_get_bounds(window_layer);
+    destroy_active_layout();
+    load_active_layout(window_layer, bounds);
+
+    update_time();
+    update_battery();
+    update_steps();
+}
+
+static void main_window_load(Window *window) {
+    Layer *window_layer = window_get_root_layer(window);
+    GRect bounds = layer_get_bounds(window_layer);
+
+    window_set_background_color(window, GColorBlack);
+
+    init_channels();
+    load_config();
+    load_active_layout(window_layer, bounds);
 
     update_time();
     update_battery();
@@ -358,10 +454,7 @@ static void main_window_load(Window *window) {
 }
 
 static void main_window_unload(Window *window) {
-    for (int i = 0; i < s_slot_count; i++) {
-        layer_destroy(s_slot_layers[i]);
-    }
-    layer_destroy(s_separator_layer);
+    destroy_active_layout();
 }
 
 static void init(void) {
@@ -374,6 +467,9 @@ static void init(void) {
 
     tick_timer_service_subscribe(MINUTE_UNIT, tick_handler);
     battery_state_service_subscribe(battery_callback);
+
+    app_message_register_inbox_received(inbox_received_callback);
+    app_message_open(app_message_inbox_size_maximum(), app_message_outbox_size_maximum());
 }
 
 static void deinit(void) {

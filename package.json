@@ -2,18 +2,32 @@
   "name": "pebble-ha-dashboard",
   "author": "Mark Johnson",
   "version": "1.0.0",
-  "keywords": ["pebble-app"],
+  "keywords": [
+    "pebble-app"
+  ],
   "private": true,
-  "dependencies": {},
+  "dependencies": {
+    "pebble-clay": "^1.0.4"
+  },
   "pebble": {
     "displayName": "HA Dashboard",
     "uuid": "d6e3076f-d50c-4ce4-89c5-982b45b12e3d",
     "sdkVersion": "3",
     "enableMultiJS": true,
-    "targetPlatforms": ["emery"],
+    "targetPlatforms": [
+      "emery"
+    ],
     "watchapp": {
       "watchface": true
     },
+    "messageKeys": [
+      "TEMPLATE_INDEX",
+      "SLOT_0_CHANNEL",
+      "SLOT_1_CHANNEL",
+      "SLOT_2_CHANNEL",
+      "SLOT_3_CHANNEL",
+      "SLOT_4_CHANNEL"
+    ],
     "resources": {
       "media": []
     }

@@ -26,7 +26,13 @@
       "SLOT_1_CHANNEL",
       "SLOT_2_CHANNEL",
       "SLOT_3_CHANNEL",
-      "SLOT_4_CHANNEL"
+      "SLOT_4_CHANNEL",
+      "HA1_VALUE",
+      "HA1_LABEL",
+      "HA2_VALUE",
+      "HA2_LABEL",
+      "HA3_VALUE",
+      "HA3_LABEL"
     ],
     "resources": {
       "media": []

@@ -1,13 +1,15 @@
 // Clay configuration schema for the HA Dashboard watchface.
 //
 // Channel values below must stay in sync with the ChannelIndex enum in
-// src/c/main.c: 0=TIME, 1=DATE, 2=BATTERY, 3=STEPS, 4=HA placeholder (CH3).
+// src/c/main.c: 0=TIME, 1=DATE, 2=BATTERY, 3=STEPS, 4=HA1, 5=HA2, 6=HA3.
 var CHANNEL_OPTIONS = [
   { label: "Time", value: 0 },
   { label: "Date", value: 1 },
   { label: "Battery", value: 2 },
   { label: "Steps", value: 3 },
-  { label: "HA channel 3 (placeholder)", value: 4 },
+  { label: "HA channel 1", value: 4 },
+  { label: "HA channel 2", value: 5 },
+  { label: "HA channel 3", value: 6 },
 ];
 
 function slotSelect(slotIndex, defaultChannel) {
@@ -48,12 +50,42 @@ module.exports = [
       "template uses are ignored.",
   },
   // Defaults mirror Template 0's slot assignments (see build_template_0
-  // in main.c): hero=Time, medium=Date, small rows=Battery/Steps/CH3.
+  // in main.c): hero=Time, medium=Date, small rows=Battery/Steps/HA1.
   slotSelect(0, 0),
   slotSelect(1, 1),
   slotSelect(2, 2),
   slotSelect(3, 3),
   slotSelect(4, 4),
+  {
+    type: "heading",
+    defaultValue: "Home Assistant Connection",
+    size: 3,
+  },
+  {
+    type: "text",
+    defaultValue:
+      "These stay on your phone — they're used by pkjs to open a " +
+      "WebSocket to Home Assistant and are never sent to the watch.",
+  },
+  {
+    type: "input",
+    messageKey: "HA_URL",
+    label: "Home Assistant URL",
+    defaultValue: "",
+    attributes: {
+      placeholder: "http://homeassistant.local:8123",
+    },
+  },
+  {
+    type: "input",
+    messageKey: "HA_TOKEN",
+    label: "Long-lived access token",
+    defaultValue: "",
+    attributes: {
+      type: "password",
+      placeholder: "Paste your token here",
+    },
+  },
   {
     type: "submit",
     defaultValue: "Save",

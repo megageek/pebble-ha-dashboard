@@ -2,6 +2,7 @@
 
 #define MAX_SLOTS 8
 #define NUM_CONFIGURABLE_SLOTS 5  // must match the SLOT_n_CHANNEL messageKeys in package.json
+#define NUM_HA_CHANNELS 3  // must match the HAn_VALUE/HAn_LABEL messageKeys in package.json
 
 #define PERSIST_KEY_TEMPLATE 100
 #define PERSIST_KEY_SLOT_BASE 101  // slot i -> PERSIST_KEY_SLOT_BASE + i
@@ -11,7 +12,9 @@ typedef enum {
     CHANNEL_DATE,
     CHANNEL_BATTERY,
     CHANNEL_STEPS,
-    CHANNEL_HA_PLACEHOLDER,
+    CHANNEL_HA_1,
+    CHANNEL_HA_2,
+    CHANNEL_HA_3,
     NUM_CHANNELS,
 } ChannelIndex;
 
@@ -84,9 +87,17 @@ static void init_channels(void) {
     s_channels[CHANNEL_STEPS] = (ChannelData) {
         .kind = CHANNEL_KIND_NUMERIC, .style = CHANNEL_STYLE_RAW, .label = "STEPS",
     };
-    // Stands in for a future Home Assistant-pushed channel until the pkjs bridge exists.
-    s_channels[CHANNEL_HA_PLACEHOLDER] = (ChannelData) {
-        .kind = CHANNEL_KIND_TEXT, .style = CHANNEL_STYLE_RAW, .label = "CH3", .text = "--",
+    // Remote channels pushed by Home Assistant via the pkjs WebSocket bridge.
+    // Text until first update arrives; HA can repurpose a channel's kind
+    // implicitly (values always arrive as strings over AppMessage today).
+    s_channels[CHANNEL_HA_1] = (ChannelData) {
+        .kind = CHANNEL_KIND_TEXT, .style = CHANNEL_STYLE_RAW, .label = "HA1", .text = "--",
+    };
+    s_channels[CHANNEL_HA_2] = (ChannelData) {
+        .kind = CHANNEL_KIND_TEXT, .style = CHANNEL_STYLE_RAW, .label = "HA2", .text = "--",
+    };
+    s_channels[CHANNEL_HA_3] = (ChannelData) {
+        .kind = CHANNEL_KIND_TEXT, .style = CHANNEL_STYLE_RAW, .label = "HA3", .text = "--",
     };
 }
 
@@ -114,7 +125,7 @@ static int build_template_0(GRect bounds, SlotSpec *out) {
     const int num_stats = 3;
     const int available = bounds.size.h - stats_top - bottom_margin;
     const int row_height = available / num_stats;
-    const ChannelIndex stat_channels[3] = { CHANNEL_BATTERY, CHANNEL_STEPS, CHANNEL_HA_PLACEHOLDER };
+    const ChannelIndex stat_channels[3] = { CHANNEL_BATTERY, CHANNEL_STEPS, CHANNEL_HA_1 };
 
     for (int i = 0; i < num_stats; i++) {
         int row_top = stats_top + i * row_height;
@@ -147,7 +158,7 @@ static int build_template_1(GRect bounds, SlotSpec *out) {
     const int available = bounds.size.h - stats_top - bottom_margin;
     const int row_height = available / num_stats;
     const ChannelIndex stat_channels[4] = {
-        CHANNEL_TIME, CHANNEL_DATE, CHANNEL_STEPS, CHANNEL_HA_PLACEHOLDER,
+        CHANNEL_TIME, CHANNEL_DATE, CHANNEL_STEPS, CHANNEL_HA_1,
     };
 
     for (int i = 0; i < num_stats; i++) {
@@ -424,18 +435,52 @@ static void inbox_received_callback(DictionaryIterator *iterator, void *context)
         }
     }
 
-    if (!layout_changed) {
+    // Remote channel updates pushed by pkjs from Home Assistant. Only
+    // redraws the affected slots — never a layout change on their own.
+    bool value_changed = false;
+    const uint32_t ha_value_keys[NUM_HA_CHANNELS] = {
+        MESSAGE_KEY_HA1_VALUE, MESSAGE_KEY_HA2_VALUE, MESSAGE_KEY_HA3_VALUE,
+    };
+    const uint32_t ha_label_keys[NUM_HA_CHANNELS] = {
+        MESSAGE_KEY_HA1_LABEL, MESSAGE_KEY_HA2_LABEL, MESSAGE_KEY_HA3_LABEL,
+    };
+    const ChannelIndex ha_channels[NUM_HA_CHANNELS] = { CHANNEL_HA_1, CHANNEL_HA_2, CHANNEL_HA_3 };
+
+    for (int i = 0; i < NUM_HA_CHANNELS; i++) {
+        ChannelData *ch = &s_channels[ha_channels[i]];
+
+        Tuple *value_tuple = dict_find(iterator, ha_value_keys[i]);
+        if (value_tuple && value_tuple->type == TUPLE_CSTRING) {
+            strncpy(ch->text, value_tuple->value->cstring, sizeof(ch->text) - 1);
+            ch->text[sizeof(ch->text) - 1] = '\0';
+            ch->kind = CHANNEL_KIND_TEXT;
+            value_changed = true;
+        }
+
+        Tuple *label_tuple = dict_find(iterator, ha_label_keys[i]);
+        if (label_tuple && label_tuple->type == TUPLE_CSTRING) {
+            strncpy(ch->label, label_tuple->value->cstring, sizeof(ch->label) - 1);
+            ch->label[sizeof(ch->label) - 1] = '\0';
+            value_changed = true;
+        }
+    }
+
+    if (!layout_changed && !value_changed) {
         return;
     }
 
-    Layer *window_layer = window_get_root_layer(s_main_window);
-    GRect bounds = layer_get_bounds(window_layer);
-    destroy_active_layout();
-    load_active_layout(window_layer, bounds);
+    if (layout_changed) {
+        Layer *window_layer = window_get_root_layer(s_main_window);
+        GRect bounds = layer_get_bounds(window_layer);
+        destroy_active_layout();
+        load_active_layout(window_layer, bounds);
 
-    update_time();
-    update_battery();
-    update_steps();
+        update_time();
+        update_battery();
+        update_steps();
+    } else {
+        mark_all_slots_dirty();
+    }
 }
 
 static void main_window_load(Window *window) {

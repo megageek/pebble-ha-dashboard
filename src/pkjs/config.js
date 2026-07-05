@@ -1,7 +1,11 @@
 // Clay configuration schema for the HA Dashboard watchface.
 //
 // Channel values below must stay in sync with the ChannelIndex enum in
-// src/c/main.c: 0=TIME, 1=DATE, 2=BATTERY, 3=STEPS, 4=HA1, 5=HA2, 6=HA3.
+// src/c/main.c: 0=TIME, 1=DATE, 2=BATTERY, 3=STEPS, 4=HA1, 5=HA2, 6=HA3,
+// 7=BATTERY_CHARGING, 8=CONNECTED, 9=ACTIVE_MINUTES, 10=DISTANCE,
+// 11=ACTIVE_KCAL, 12=RESTING_KCAL, 13=SLEEP_MINUTES, 14=SLEEP_RESTFUL_MINUTES,
+// 15=HEART_RATE. The new ones (7-15) are appended after the original 7 so a
+// previously-persisted slot assignment keeps meaning the same channel.
 var CHANNEL_OPTIONS = [
   { label: "Time", value: 0 },
   { label: "Date", value: 1 },
@@ -10,6 +14,15 @@ var CHANNEL_OPTIONS = [
   { label: "HA channel 1", value: 4 },
   { label: "HA channel 2", value: 5 },
   { label: "HA channel 3", value: 6 },
+  { label: "Battery charging", value: 7 },
+  { label: "Phone connected", value: 8 },
+  { label: "Active minutes", value: 9 },
+  { label: "Distance walked", value: 10 },
+  { label: "Active calories", value: 11 },
+  { label: "Resting calories", value: 12 },
+  { label: "Sleep minutes", value: 13 },
+  { label: "Restful sleep minutes", value: 14 },
+  { label: "Heart rate", value: 15 },
 ];
 
 function slotSelect(slotIndex, defaultChannel) {

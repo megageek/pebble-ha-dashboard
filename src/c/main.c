@@ -16,6 +16,20 @@ typedef enum {
     CHANNEL_HA_1,
     CHANNEL_HA_2,
     CHANNEL_HA_3,
+    // Appended after the original 7 (rather than interleaved) so a
+    // previously-persisted SLOT_n_CHANNEL value keeps meaning the same
+    // channel across app updates. Same underlying data as the outbound
+    // status report, but local display is independent of the
+    // REPORT_ENABLE_* toggles — those only gate what's sent to HA.
+    CHANNEL_BATTERY_CHARGING,
+    CHANNEL_CONNECTED,
+    CHANNEL_ACTIVE_MINUTES,
+    CHANNEL_DISTANCE,
+    CHANNEL_ACTIVE_KCAL,
+    CHANNEL_RESTING_KCAL,
+    CHANNEL_SLEEP_MINUTES,
+    CHANNEL_SLEEP_RESTFUL_MINUTES,
+    CHANNEL_HEART_RATE,
     NUM_CHANNELS,
 } ChannelIndex;
 
@@ -121,6 +135,39 @@ static void init_channels(void) {
     };
     s_channels[CHANNEL_HA_3] = (ChannelData) {
         .kind = CHANNEL_KIND_TEXT, .style = CHANNEL_STYLE_RAW, .label = "HA3", .text = "--",
+    };
+
+    // Local health/status channels — same source data as the outbound
+    // status report, but selectable into any slot regardless of whether
+    // reporting to HA is enabled for that measure. Populated by
+    // update_health_channels()/update_battery()/battery_callback(); kind
+    // may flip to TEXT ("N/A") there if a metric isn't accessible.
+    s_channels[CHANNEL_BATTERY_CHARGING] = (ChannelData) {
+        .kind = CHANNEL_KIND_BINARY, .style = CHANNEL_STYLE_RAW, .label = "CHARGE",
+    };
+    s_channels[CHANNEL_CONNECTED] = (ChannelData) {
+        .kind = CHANNEL_KIND_BINARY, .style = CHANNEL_STYLE_RAW, .label = "CONN",
+    };
+    s_channels[CHANNEL_ACTIVE_MINUTES] = (ChannelData) {
+        .kind = CHANNEL_KIND_NUMERIC, .style = CHANNEL_STYLE_RAW, .label = "ACTIVE", .unit = "min",
+    };
+    s_channels[CHANNEL_DISTANCE] = (ChannelData) {
+        .kind = CHANNEL_KIND_NUMERIC, .style = CHANNEL_STYLE_RAW, .label = "DIST", .unit = "m",
+    };
+    s_channels[CHANNEL_ACTIVE_KCAL] = (ChannelData) {
+        .kind = CHANNEL_KIND_NUMERIC, .style = CHANNEL_STYLE_RAW, .label = "ACAL", .unit = "kcal",
+    };
+    s_channels[CHANNEL_RESTING_KCAL] = (ChannelData) {
+        .kind = CHANNEL_KIND_NUMERIC, .style = CHANNEL_STYLE_RAW, .label = "RCAL", .unit = "kcal",
+    };
+    s_channels[CHANNEL_SLEEP_MINUTES] = (ChannelData) {
+        .kind = CHANNEL_KIND_NUMERIC, .style = CHANNEL_STYLE_RAW, .label = "SLEEP", .unit = "min",
+    };
+    s_channels[CHANNEL_SLEEP_RESTFUL_MINUTES] = (ChannelData) {
+        .kind = CHANNEL_KIND_NUMERIC, .style = CHANNEL_STYLE_RAW, .label = "RSLEEP", .unit = "min",
+    };
+    s_channels[CHANNEL_HEART_RATE] = (ChannelData) {
+        .kind = CHANNEL_KIND_NUMERIC, .style = CHANNEL_STYLE_RAW, .label = "HR", .unit = "bpm",
     };
 }
 
@@ -518,28 +565,72 @@ static void update_time(void) {
 static void update_battery(void) {
     BatteryChargeState state = battery_state_service_peek();
     s_channels[CHANNEL_BATTERY].value = state.charge_percent;
+    s_channels[CHANNEL_BATTERY_CHARGING].value = state.is_charging ? 1 : 0;
     mark_all_slots_dirty();
 }
 
-static void update_steps(void) {
-    time_t start = time_start_of_today();
-    time_t end = time(NULL);
-    HealthServiceAccessibilityMask mask =
-        health_service_metric_accessible(HealthMetricStepCount, start, end);
-
+// Shared by CHANNEL_STEPS and the health-metric channels in
+// update_health_channels(): sets kind=TEXT "N/A" when the metric isn't
+// accessible (no permission, unsupported hardware, or no data for the
+// range), otherwise kind=NUMERIC with the (optionally scaled, e.g.
+// seconds->minutes) summed value.
+static void update_numeric_health_channel(ChannelIndex channel, HealthMetric metric,
+                                           time_t start, time_t end, int32_t divisor) {
+    ChannelData *ch = &s_channels[channel];
+    HealthServiceAccessibilityMask mask = health_service_metric_accessible(metric, start, end);
     if (mask & HealthServiceAccessibilityMaskAvailable) {
-        s_channels[CHANNEL_STEPS].kind = CHANNEL_KIND_NUMERIC;
-        s_channels[CHANNEL_STEPS].value = (int32_t)health_service_sum_today(HealthMetricStepCount);
+        ch->kind = CHANNEL_KIND_NUMERIC;
+        HealthValue value = health_service_sum(metric, start, end);
+        ch->value = divisor > 1 ? (int32_t)value / divisor : (int32_t)value;
     } else {
-        s_channels[CHANNEL_STEPS].kind = CHANNEL_KIND_TEXT;
-        strncpy(s_channels[CHANNEL_STEPS].text, "N/A", sizeof(s_channels[CHANNEL_STEPS].text));
+        ch->kind = CHANNEL_KIND_TEXT;
+        strncpy(ch->text, "N/A", sizeof(ch->text) - 1);
+        ch->text[sizeof(ch->text) - 1] = '\0';
     }
+}
+
+static void update_steps(void) {
+    update_numeric_health_channel(CHANNEL_STEPS, HealthMetricStepCount, time_start_of_today(), time(NULL), 1);
+    mark_all_slots_dirty();
+}
+
+// The rest of the health/status channels — same source data as the
+// outbound status report, but always updated regardless of the
+// REPORT_ENABLE_* toggles (those only gate what's sent to HA, not what
+// the watch itself can display).
+static void update_health_channels(void) {
+    time_t day_start = time_start_of_today();
+    time_t now = time(NULL);
+
+    update_numeric_health_channel(CHANNEL_ACTIVE_MINUTES, HealthMetricActiveSeconds, day_start, now, 60);
+    update_numeric_health_channel(CHANNEL_DISTANCE, HealthMetricWalkedDistanceMeters, day_start, now, 1);
+    update_numeric_health_channel(CHANNEL_ACTIVE_KCAL, HealthMetricActiveKCalories, day_start, now, 1);
+    update_numeric_health_channel(CHANNEL_RESTING_KCAL, HealthMetricRestingKCalories, day_start, now, 1);
+    update_numeric_health_channel(CHANNEL_SLEEP_MINUTES, HealthMetricSleepSeconds, day_start, now, 60);
+    update_numeric_health_channel(CHANNEL_SLEEP_RESTFUL_MINUTES, HealthMetricSleepRestfulSeconds, day_start, now, 60);
+
+    // Heart rate is instantaneous, not summed — see send_status_report()'s
+    // comment for why this deliberately reads the default background
+    // sample rather than requesting a fresher one.
+    ChannelData *hr = &s_channels[CHANNEL_HEART_RATE];
+    HealthServiceAccessibilityMask hr_mask = health_service_metric_accessible(HealthMetricHeartRateBPM, now, now);
+    if (hr_mask & HealthServiceAccessibilityMaskAvailable) {
+        hr->kind = CHANNEL_KIND_NUMERIC;
+        hr->value = (int32_t)health_service_peek_current_value(HealthMetricHeartRateBPM);
+    } else {
+        hr->kind = CHANNEL_KIND_TEXT;
+        strncpy(hr->text, "N/A", sizeof(hr->text) - 1);
+        hr->text[sizeof(hr->text) - 1] = '\0';
+    }
+
+    s_channels[CHANNEL_CONNECTED].value = connection_service_peek_pebble_app_connection() ? 1 : 0;
 
     mark_all_slots_dirty();
 }
 
 static void battery_callback(BatteryChargeState state) {
     s_channels[CHANNEL_BATTERY].value = state.charge_percent;
+    s_channels[CHANNEL_BATTERY_CHARGING].value = state.is_charging ? 1 : 0;
     mark_all_slots_dirty();
     send_status_report();
 }
@@ -547,6 +638,7 @@ static void battery_callback(BatteryChargeState state) {
 static void tick_handler(struct tm *tick_time, TimeUnits units_changed) {
     update_time();
     update_steps();
+    update_health_channels();
     send_status_report();
 }
 
@@ -687,6 +779,7 @@ static void inbox_received_callback(DictionaryIterator *iterator, void *context)
         update_time();
         update_battery();
         update_steps();
+        update_health_channels();
     } else if (value_changed) {
         mark_all_slots_dirty();
     }

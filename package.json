@@ -49,7 +49,15 @@
       "REPORT_HEART_RATE_BPM",
       "REPORT_MODEL",
       "REPORT_FIRMWARE",
-      "REPORT_COLOR"
+      "REPORT_COLOR",
+      "REPORT_DISABLED",
+      "REPORT_ENABLE_BATTERY",
+      "REPORT_ENABLE_STEPS",
+      "REPORT_ENABLE_ACTIVITY",
+      "REPORT_ENABLE_SLEEP",
+      "REPORT_ENABLE_HEART_RATE",
+      "REPORT_ENABLE_CONNECTED",
+      "REPORT_ENABLE_DEVICE_INFO"
     ],
     "resources": {
       "media": []

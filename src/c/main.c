@@ -6,6 +6,7 @@
 
 #define PERSIST_KEY_TEMPLATE 100
 #define PERSIST_KEY_SLOT_BASE 101  // slot i -> PERSIST_KEY_SLOT_BASE + i
+#define PERSIST_KEY_REPORT_ENABLED_BASE 200  // group i -> PERSIST_KEY_REPORT_ENABLED_BASE + i
 
 typedef enum {
     CHANNEL_TIME,
@@ -72,6 +73,28 @@ static ChannelData s_channels[NUM_CHANNELS];
 static int s_active_template = 0;
 // -1 means "use the template's default channel for this slot".
 static int s_slot_channel_override[NUM_CONFIGURABLE_SLOTS];
+
+// Groups of outbound status-report fields (see "Outbound reporting" below),
+// each independently toggleable via Clay config.
+typedef enum {
+    REPORT_GROUP_BATTERY,
+    REPORT_GROUP_STEPS,
+    REPORT_GROUP_ACTIVITY,     // active seconds, distance, active + resting kcal
+    REPORT_GROUP_SLEEP,        // sleep seconds, restful sleep seconds
+    REPORT_GROUP_HEART_RATE,
+    REPORT_GROUP_CONNECTED,
+    REPORT_GROUP_DEVICE_INFO,  // model, firmware, color (sent once at startup)
+    NUM_REPORT_GROUPS,
+} ReportGroup;
+
+static const char *const REPORT_GROUP_NAMES[NUM_REPORT_GROUPS] = {
+    "battery", "steps", "activity", "sleep", "heart_rate", "connected", "device_info",
+};
+
+// All enabled by default; persisted overrides loaded in load_config().
+static bool s_report_enabled[NUM_REPORT_GROUPS] = {
+    true, true, true, true, true, true, true,
+};
 
 static void init_channels(void) {
     s_channels[CHANNEL_TIME] = (ChannelData) {
@@ -194,6 +217,13 @@ static void load_config(void) {
             if (stored >= 0 && stored < NUM_CHANNELS) {
                 s_slot_channel_override[i] = stored;
             }
+        }
+    }
+
+    for (int i = 0; i < NUM_REPORT_GROUPS; i++) {
+        s_report_enabled[i] = true;
+        if (persist_exists(PERSIST_KEY_REPORT_ENABLED_BASE + i)) {
+            s_report_enabled[i] = persist_read_int(PERSIST_KEY_REPORT_ENABLED_BASE + i) != 0;
         }
     }
 }
@@ -324,8 +354,18 @@ static void slot_update_proc(Layer *layer, GContext *ctx) {
 // (see HA_INTEGRATION_SPEC.md). Every metric here is read from a service the
 // watchface already touches for its own display (battery, steps) or is a
 // cheap additional read at the same MINUTE_UNIT cadence — nothing here adds
-// a new wake-up source, except the heart rate sample-period request, which
-// has a real, acknowledged battery cost.
+// a new wake-up source or extra battery cost. Heart rate deliberately reads
+// whatever the system's own default background sampling already produced
+// (health_service_peek_current_value()) rather than requesting an elevated
+// sample rate, so it's exactly as cheap as everything else here.
+//
+// Each measure belongs to a ReportGroup the user can disable via Clay config
+// (see the top of the file); disabling one doesn't just stop sending its
+// fields — every report also carries a REPORT_DISABLED list of currently-
+// disabled group names, so the HA-side integration can tell "never available
+// on this hardware" (field simply absent) apart from "user turned this off"
+// (group named in REPORT_DISABLED) and remove/deactivate the right entities
+// accordingly.
 // ---------------------------------------------------------------------------
 
 static void write_health_metric_if_available(DictionaryIterator *iter, uint32_t key,
@@ -337,47 +377,84 @@ static void write_health_metric_if_available(DictionaryIterator *iter, uint32_t 
     }
 }
 
+// Comma-joins the names of every currently-disabled group so HA can tell
+// "user turned this off" apart from "not accessible on this hardware" (the
+// latter is just a field that's silently absent, same as it always was).
+static void write_disabled_groups(DictionaryIterator *iter) {
+    char buffer[80];
+    buffer[0] = '\0';
+    bool any = false;
+
+    for (int i = 0; i < NUM_REPORT_GROUPS; i++) {
+        if (s_report_enabled[i]) {
+            continue;
+        }
+        if (any) {
+            strncat(buffer, ",", sizeof(buffer) - strlen(buffer) - 1);
+        }
+        strncat(buffer, REPORT_GROUP_NAMES[i], sizeof(buffer) - strlen(buffer) - 1);
+        any = true;
+    }
+
+    if (any) {
+        dict_write_cstring(iter, MESSAGE_KEY_REPORT_DISABLED, buffer);
+    }
+}
+
 static void send_status_report(void) {
     DictionaryIterator *iter;
     if (app_message_outbox_begin(&iter) != APP_MSG_OK) {
         return;  // outbox busy; the next periodic call will try again
     }
 
-    BatteryChargeState battery = battery_state_service_peek();
-    dict_write_int32(iter, MESSAGE_KEY_REPORT_BATTERY_PERCENT, battery.charge_percent);
-    dict_write_int32(iter, MESSAGE_KEY_REPORT_BATTERY_CHARGING, battery.is_charging ? 1 : 0);
-    dict_write_int32(iter, MESSAGE_KEY_REPORT_CONNECTED,
-                      connection_service_peek_pebble_app_connection() ? 1 : 0);
+    if (s_report_enabled[REPORT_GROUP_BATTERY]) {
+        BatteryChargeState battery = battery_state_service_peek();
+        dict_write_int32(iter, MESSAGE_KEY_REPORT_BATTERY_PERCENT, battery.charge_percent);
+        dict_write_int32(iter, MESSAGE_KEY_REPORT_BATTERY_CHARGING, battery.is_charging ? 1 : 0);
+    }
+
+    if (s_report_enabled[REPORT_GROUP_CONNECTED]) {
+        dict_write_int32(iter, MESSAGE_KEY_REPORT_CONNECTED,
+                          connection_service_peek_pebble_app_connection() ? 1 : 0);
+    }
 
     time_t day_start = time_start_of_today();
     time_t now = time(NULL);
 
-    write_health_metric_if_available(iter, MESSAGE_KEY_REPORT_STEPS, HealthMetricStepCount, day_start, now);
-    write_health_metric_if_available(iter, MESSAGE_KEY_REPORT_ACTIVE_SECONDS, HealthMetricActiveSeconds, day_start, now);
-    write_health_metric_if_available(iter, MESSAGE_KEY_REPORT_DISTANCE_METERS, HealthMetricWalkedDistanceMeters, day_start, now);
-    write_health_metric_if_available(iter, MESSAGE_KEY_REPORT_ACTIVE_KCAL, HealthMetricActiveKCalories, day_start, now);
-    write_health_metric_if_available(iter, MESSAGE_KEY_REPORT_RESTING_KCAL, HealthMetricRestingKCalories, day_start, now);
-    write_health_metric_if_available(iter, MESSAGE_KEY_REPORT_SLEEP_SECONDS, HealthMetricSleepSeconds, day_start, now);
-    write_health_metric_if_available(iter, MESSAGE_KEY_REPORT_SLEEP_RESTFUL_SECONDS, HealthMetricSleepRestfulSeconds, day_start, now);
+    if (s_report_enabled[REPORT_GROUP_STEPS]) {
+        write_health_metric_if_available(iter, MESSAGE_KEY_REPORT_STEPS, HealthMetricStepCount, day_start, now);
+    }
+
+    if (s_report_enabled[REPORT_GROUP_ACTIVITY]) {
+        write_health_metric_if_available(iter, MESSAGE_KEY_REPORT_ACTIVE_SECONDS, HealthMetricActiveSeconds, day_start, now);
+        write_health_metric_if_available(iter, MESSAGE_KEY_REPORT_DISTANCE_METERS, HealthMetricWalkedDistanceMeters, day_start, now);
+        write_health_metric_if_available(iter, MESSAGE_KEY_REPORT_ACTIVE_KCAL, HealthMetricActiveKCalories, day_start, now);
+        write_health_metric_if_available(iter, MESSAGE_KEY_REPORT_RESTING_KCAL, HealthMetricRestingKCalories, day_start, now);
+    }
+
+    if (s_report_enabled[REPORT_GROUP_SLEEP]) {
+        write_health_metric_if_available(iter, MESSAGE_KEY_REPORT_SLEEP_SECONDS, HealthMetricSleepSeconds, day_start, now);
+        write_health_metric_if_available(iter, MESSAGE_KEY_REPORT_SLEEP_RESTFUL_SECONDS, HealthMetricSleepRestfulSeconds, day_start, now);
+    }
 
     // Heart rate is an instantaneous reading, not a daily sum — accessibility
     // is checked for "right now", and health_service_peek_current_value()
-    // (not _sum_today()) returns the latest sample.
-    HealthServiceAccessibilityMask hr_mask = health_service_metric_accessible(HealthMetricHeartRateBPM, now, now);
-    if (hr_mask & HealthServiceAccessibilityMaskAvailable) {
-        HealthValue hr = health_service_peek_current_value(HealthMetricHeartRateBPM);
-        dict_write_int32(iter, MESSAGE_KEY_REPORT_HEART_RATE_BPM, (int32_t)hr);
+    // (not _sum_today()) returns the latest sample. This deliberately relies
+    // on the system's own default background HR sampling rather than
+    // requesting an elevated sample rate — whatever value is already cached
+    // (per Pebble's docs, at most ~15 min old) is what gets reported, no
+    // extra battery cost incurred by this watchface.
+    if (s_report_enabled[REPORT_GROUP_HEART_RATE]) {
+        HealthServiceAccessibilityMask hr_mask = health_service_metric_accessible(HealthMetricHeartRateBPM, now, now);
+        if (hr_mask & HealthServiceAccessibilityMaskAvailable) {
+            HealthValue hr = health_service_peek_current_value(HealthMetricHeartRateBPM);
+            dict_write_int32(iter, MESSAGE_KEY_REPORT_HEART_RATE_BPM, (int32_t)hr);
+        }
     }
 
-    app_message_outbox_send();
-}
+    write_disabled_groups(iter);
 
-// Requesting fresher heart rate samples has a real battery cost, so the
-// elevated sample rate HA asked us to keep to a minute (matching our
-// existing tick cadence) rather than anything more aggressive — and it
-// expires on its own, so it's renewed every tick rather than requested once.
-static void request_heart_rate_updates(void) {
-    health_service_set_heart_rate_sample_period(60);
+    app_message_outbox_send();
 }
 
 static const char *watch_model_name(void) {
@@ -403,6 +480,10 @@ static const char *watch_color_name(void) {
 
 // Static device info, sent once at startup rather than on every tick.
 static void send_device_info(void) {
+    if (!s_report_enabled[REPORT_GROUP_DEVICE_INFO]) {
+        return;  // its disabled state still surfaces via write_disabled_groups()
+    }
+
     DictionaryIterator *iter;
     if (app_message_outbox_begin(&iter) != APP_MSG_OK) {
         return;
@@ -466,7 +547,6 @@ static void battery_callback(BatteryChargeState state) {
 static void tick_handler(struct tm *tick_time, TimeUnits units_changed) {
     update_time();
     update_steps();
-    request_heart_rate_updates();
     send_status_report();
 }
 
@@ -571,7 +651,30 @@ static void inbox_received_callback(DictionaryIterator *iterator, void *context)
         }
     }
 
-    if (!layout_changed && !value_changed) {
+    // Per-measure reporting toggles from Clay config. Changing one doesn't
+    // affect what's shown on the watch face at all — only what gets reported
+    // out — so it's tracked separately from layout_changed/value_changed.
+    bool reporting_config_changed = false;
+    const uint32_t report_enable_keys[NUM_REPORT_GROUPS] = {
+        MESSAGE_KEY_REPORT_ENABLE_BATTERY, MESSAGE_KEY_REPORT_ENABLE_STEPS,
+        MESSAGE_KEY_REPORT_ENABLE_ACTIVITY, MESSAGE_KEY_REPORT_ENABLE_SLEEP,
+        MESSAGE_KEY_REPORT_ENABLE_HEART_RATE, MESSAGE_KEY_REPORT_ENABLE_CONNECTED,
+        MESSAGE_KEY_REPORT_ENABLE_DEVICE_INFO,
+    };
+    for (int i = 0; i < NUM_REPORT_GROUPS; i++) {
+        Tuple *tuple = dict_find(iterator, report_enable_keys[i]);
+        if (!tuple) {
+            continue;
+        }
+        bool enabled = tuple->value->int32 != 0;
+        if (enabled != s_report_enabled[i]) {
+            s_report_enabled[i] = enabled;
+            persist_write_int(PERSIST_KEY_REPORT_ENABLED_BASE + i, enabled ? 1 : 0);
+            reporting_config_changed = true;
+        }
+    }
+
+    if (!layout_changed && !value_changed && !reporting_config_changed) {
         return;
     }
 
@@ -584,8 +687,15 @@ static void inbox_received_callback(DictionaryIterator *iterator, void *context)
         update_time();
         update_battery();
         update_steps();
-    } else {
+    } else if (value_changed) {
         mark_all_slots_dirty();
+    }
+
+    // Report promptly on a toggle change instead of waiting up to a minute
+    // for the next tick — this is exactly the "let HA know now" signal the
+    // disabled-groups list exists for.
+    if (reporting_config_changed) {
+        send_status_report();
     }
 }
 
@@ -622,7 +732,6 @@ static void init(void) {
     app_message_register_inbox_received(inbox_received_callback);
     app_message_open(app_message_inbox_size_maximum(), app_message_outbox_size_maximum());
 
-    request_heart_rate_updates();
     send_device_info();
     send_status_report();
 }

@@ -15,6 +15,13 @@ var WATCH_SETTINGS_KEYS = [
   "SLOT_2_CHANNEL",
   "SLOT_3_CHANNEL",
   "SLOT_4_CHANNEL",
+  "REPORT_ENABLE_BATTERY",
+  "REPORT_ENABLE_STEPS",
+  "REPORT_ENABLE_ACTIVITY",
+  "REPORT_ENABLE_SLEEP",
+  "REPORT_ENABLE_HEART_RATE",
+  "REPORT_ENABLE_CONNECTED",
+  "REPORT_ENABLE_DEVICE_INFO",
 ];
 
 Pebble.addEventListener("showConfiguration", function () {
@@ -37,9 +44,14 @@ Pebble.addEventListener("webviewclosed", function (e) {
 
   var watchSettings = {};
   WATCH_SETTINGS_KEYS.forEach(function (key) {
-    if (settings[key] !== undefined) {
-      watchSettings[key] = settings[key];
+    if (settings[key] === undefined) {
+      return;
     }
+    var value = settings[key];
+    // Clay's "toggle" component (REPORT_ENABLE_*) reads a checkbox's raw
+    // .checked property, i.e. a JS boolean, not the 0/1 int the C side and
+    // AppMessage expect.
+    watchSettings[key] = typeof value === "boolean" ? (value ? 1 : 0) : value;
   });
 
   Pebble.sendAppMessage(

@@ -339,6 +339,8 @@ function freshEnv() {
     SLOT_2_CHANNEL: 2,
     SLOT_3_CHANNEL: 3,
     SLOT_4_CHANNEL: 0,
+    REPORT_ENABLE_BATTERY: true,
+    REPORT_ENABLE_HEART_RATE: false, // Clay's toggle component -> raw JS boolean
     HA_URL: "http://new-ha.local:8123",
     HA_TOKEN: "newtoken",
   });
@@ -350,6 +352,11 @@ function freshEnv() {
   assert(watchMsg.TEMPLATE_INDEX === 1, "TEMPLATE_INDEX forwarded to the watch, got " + JSON.stringify(watchMsg));
   assert(watchMsg.SLOT_0_CHANNEL === 4, "SLOT_0_CHANNEL forwarded to the watch");
   assert(!("HA_URL" in watchMsg) && !("HA_TOKEN" in watchMsg), "HA_URL/HA_TOKEN withheld from the watch, got " + JSON.stringify(watchMsg));
+  assert(
+    watchMsg.REPORT_ENABLE_BATTERY === 1 && watchMsg.REPORT_ENABLE_HEART_RATE === 0,
+    "Clay's boolean toggle values converted to 1/0 ints, got " +
+      JSON.stringify({ b: watchMsg.REPORT_ENABLE_BATTERY, hr: watchMsg.REPORT_ENABLE_HEART_RATE })
+  );
 
   var secondSocket = env.getLastSocket();
   assert(
@@ -385,6 +392,27 @@ function freshEnv() {
       reportMsg.status.steps === 4213 &&
       reportMsg.status.heart_rate_bpm === 72,
     "status fields lowercased/un-prefixed correctly, got " + JSON.stringify(reportMsg.status)
+  );
+})();
+
+// --- Test 10b: REPORT_DISABLED (a string, unlike the numeric fields above)
+// relays through the same generic path without special-casing ---
+(function testDisabledGroupsRelay() {
+  var env = freshEnv();
+  env.authenticate();
+  var socket = env.getLastSocket();
+  var sentBeforeReport = socket.sent.length;
+
+  env.sendAppMessageFromWatch({
+    REPORT_BATTERY_PERCENT: 87,
+    REPORT_DISABLED: "heart_rate,sleep",
+  });
+
+  var reportMsg = socket.sent[socket.sent.length - 1];
+  assert(socket.sent.length === sentBeforeReport + 1, "sent exactly one report_status command");
+  assert(
+    reportMsg.status.disabled === "heart_rate,sleep" && reportMsg.status.battery_percent === 87,
+    "string-valued disabled field relayed alongside numeric fields, got " + JSON.stringify(reportMsg.status)
   );
 })();
 

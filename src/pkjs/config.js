@@ -58,6 +58,59 @@ module.exports = [
   slotSelect(4, 4),
   {
     type: "heading",
+    defaultValue: "Status Reporting",
+    size: 3,
+  },
+  {
+    type: "text",
+    defaultValue:
+      "Choose what the watch reports back to Home Assistant. Turning " +
+      "something off tells HA so it can remove any entity it created for it.",
+  },
+  {
+    type: "toggle",
+    messageKey: "REPORT_ENABLE_BATTERY",
+    label: "Battery",
+    defaultValue: true,
+  },
+  {
+    type: "toggle",
+    messageKey: "REPORT_ENABLE_STEPS",
+    label: "Steps",
+    defaultValue: true,
+  },
+  {
+    type: "toggle",
+    messageKey: "REPORT_ENABLE_ACTIVITY",
+    label: "Activity (active time, distance, calories)",
+    defaultValue: true,
+  },
+  {
+    type: "toggle",
+    messageKey: "REPORT_ENABLE_SLEEP",
+    label: "Sleep",
+    defaultValue: true,
+  },
+  {
+    type: "toggle",
+    messageKey: "REPORT_ENABLE_HEART_RATE",
+    label: "Heart rate",
+    defaultValue: true,
+  },
+  {
+    type: "toggle",
+    messageKey: "REPORT_ENABLE_CONNECTED",
+    label: "Connection status",
+    defaultValue: true,
+  },
+  {
+    type: "toggle",
+    messageKey: "REPORT_ENABLE_DEVICE_INFO",
+    label: "Device info (model/firmware/color)",
+    defaultValue: true,
+  },
+  {
+    type: "heading",
     defaultValue: "Home Assistant Connection",
     size: 3,
   },

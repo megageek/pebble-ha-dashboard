@@ -112,6 +112,57 @@ function hideWhenSelect(messageKey, label) {
   };
 }
 
+// Same palette as COLOR_OPTIONS plus a leading "Default" (empty string),
+// which tells the watch "no override" — fall back to whatever color the
+// slot's size class would normally use. Only for the general-purpose
+// background/value/label selects below; the dot on/off colors above always
+// need a real color; there's no "default" dot color.
+var COLOR_OPTIONS_WITH_DEFAULT = [{ label: "Default", value: "" }].concat(COLOR_OPTIONS);
+
+function colorSelectWithDefault(messageKey, label) {
+  return {
+    type: "select",
+    messageKey: messageKey,
+    label: label,
+    defaultValue: "",
+    options: COLOR_OPTIONS_WITH_DEFAULT,
+  };
+}
+
+// The 13 local (non-HA) channels that get their own background/value/label
+// color pickers below. messageKey prefixes must match local_color_channels[]
+// in main.c exactly (CHARGE/CONN reuse the same prefixes as their existing
+// on/off dot colors). HA channels 1-10 get the equivalent fields directly
+// from HA over the wire instead (see HA_INTEGRATION_SPEC.md).
+var CHANNEL_COLOR_FIELDS = [
+  { prefix: "TIME", label: "Time" },
+  { prefix: "DATE", label: "Date" },
+  { prefix: "BATTERY", label: "Battery" },
+  { prefix: "STEPS", label: "Steps" },
+  { prefix: "CHARGE", label: "Battery charging" },
+  { prefix: "CONN", label: "Phone connected" },
+  { prefix: "ACTIVE_MINUTES", label: "Active minutes" },
+  { prefix: "DISTANCE", label: "Distance walked" },
+  { prefix: "ACTIVE_KCAL", label: "Active calories" },
+  { prefix: "RESTING_KCAL", label: "Resting calories" },
+  { prefix: "SLEEP_MINUTES", label: "Sleep minutes" },
+  { prefix: "SLEEP_RESTFUL_MINUTES", label: "Restful sleep minutes" },
+  { prefix: "HEART_RATE", label: "Heart rate" },
+];
+
+function channelColorFields(prefix, label) {
+  return [
+    { type: "heading", defaultValue: label, size: 4 },
+    colorSelectWithDefault(prefix + "_BG_COLOR", "Background"),
+    colorSelectWithDefault(prefix + "_VALUE_COLOR", "Value"),
+    colorSelectWithDefault(prefix + "_LABEL_COLOR", "Label (small-row slots only)"),
+  ];
+}
+
+var CHANNEL_COLOR_SELECTS = CHANNEL_COLOR_FIELDS.reduce(function (fields, entry) {
+  return fields.concat(channelColorFields(entry.prefix, entry.label));
+}, []);
+
 module.exports = [
   {
     type: "heading",
@@ -213,6 +264,20 @@ module.exports = [
   hideWhenSelect("CONN_HIDE_WHEN", "Phone connected: visibility"),
   {
     type: "heading",
+    defaultValue: "Channel Colors",
+    size: 3,
+  },
+  {
+    type: "text",
+    defaultValue:
+      "Background, value, and label colors for each local channel, in " +
+      "whichever slot it's assigned to. \"Default\" leaves that part " +
+      "looking exactly as it does today. HA channels (1-10) set their " +
+      "own colors from Home Assistant instead (see HA_INTEGRATION_SPEC.md).",
+  },
+].concat(CHANNEL_COLOR_SELECTS).concat([
+  {
+    type: "heading",
     defaultValue: "Status Reporting",
     size: 3,
   },
@@ -298,4 +363,4 @@ module.exports = [
     type: "submit",
     defaultValue: "Save",
   },
-];
+]);

@@ -66,7 +66,10 @@ If the integration isn't installed at all, HA responds to any unrecognized comma
   "label": "Temp",
   "on_color": "red",
   "off_color": "green",
-  "hide_when": "off"
+  "hide_when": "off",
+  "bg_color": "blue",
+  "value_color": "white",
+  "label_color": "gray"
 }
 ```
 
@@ -75,7 +78,8 @@ If the integration isn't installed at all, HA responds to any unrecognized comma
 - **`label`** — optional. If omitted, the watch keeps showing whatever label it last had for that channel (including the compiled-in default, e.g. `"HA1"`, if none has ever been sent). Only send it when it changes or on the first update for a channel.
 - **`on_color`/`off_color`** — optional, only relevant if the watch user has put this channel in their status-dot group (see below). A name from the shared palette: `red`, `orange`, `yellow`, `green`, `blue`, `purple`, `white`, `gray`. Unrecognized/misspelled names fall back to gray rather than erroring. If never sent, the watch defaults both to green/red.
 - **`hide_when`** — optional, `"none"` (default — always show the dot), `"on"`, or `"off"`. Lets a "problem" indicator stay invisible until it actually needs attention (e.g. `hide_when: "off"` on a door-open sensor so the dot only appears when the door actually opens) rather than showing a "everything's fine" dot all the time.
-- **Truncation, enforced phone-side, not HA-side**: `value` is cut to **15 characters**, `label` to **7 characters**, `on_color`/`off_color` to **7 characters**, `hide_when` to **4 characters** before being relayed to the watch (hard limits of the watch's fixed-size buffers). Truncation is a dumb substring cut, not word-aware — prefer sending values that are already short (e.g. `"21.5°C"` rather than `"21.5 degrees Celsius"`) rather than relying on the phone to truncate sensibly.
+- **`bg_color`/`value_color`/`label_color`** — optional, general-purpose styling that applies to this channel's *normal* rendering wherever it's assigned, not just when it's a status dot (see "Channel colors" below). Same shared palette as `on_color`/`off_color`. If never sent, the watch falls back to its own default colors for that slot type (white/light-gray text on the plain black background), same as it always has.
+- **Truncation, enforced phone-side, not HA-side**: `value` is cut to **15 characters**, `label` to **7 characters**, `on_color`/`off_color`/`bg_color`/`value_color`/`label_color` to **7 characters**, `hide_when` to **4 characters** before being relayed to the watch (hard limits of the watch's fixed-size buffers). Truncation is a dumb substring cut, not word-aware — prefer sending values that are already short (e.g. `"21.5°C"` rather than `"21.5 degrees Celsius"`) rather than relying on the phone to truncate sensibly.
 
 ## Status dots (optional, watch-side display feature)
 
@@ -84,6 +88,15 @@ The watchface can show up to 4 small colored dots inside one screen slot, **in a
 If your integration doesn't care about dot styling, it can simply never send `on_color`/`off_color`/`hide_when` — the watch has its own defaults (green="on"/red="off", always visible) and dot rendering works fine without any HA-side involvement.
 
 Dot **size** (small/medium/large) is also a pure watch/Clay-side setting, like slot/channel assignment — HA never sends or receives it and has no visibility into what size the user picked.
+
+## Channel colors (background/value/label, optional)
+
+Separately from dot styling, every channel — including each of the 10 HA channels — can also have a background color for its slot, a foreground color for its value text, and a foreground color for its label text, applied to its *normal* rendering (not just when it happens to be a status dot). For HA channels these are exactly the `bg_color`/`value_color`/`label_color` fields on the payload above — there's no separate command for this, it's just three more optional fields on the same `pebble_channel_update`-shaped message.
+
+- **Which slot shows a channel, and whether that slot is HERO/MEDIUM/SMALL-sized, is still entirely a watch/Clay-side choice** — HA only ever styles *its own channels*, the same way it already can via `on_color`/`off_color`. There's no way for HA to affect a local (non-HA) channel's colors, or to know or care which slot number a channel currently occupies.
+- **`label_color` only has a visible effect if the channel ends up in a small stat-row slot** (`SLOT_SIZE_SMALL` on the watch side) — the only slot size that renders a label at all. If the watch user has put this channel in the HERO or MEDIUM position instead, `label_color` is accepted but has nothing to apply to; no need to avoid sending it defensively.
+- **Omit any of the three to leave that part unstyled** — the watch falls back to its own normal default for that slot type (a plain black background, white or light-gray text depending on slot size) exactly as if this feature didn't exist. There's no need to resend all three together; each is independently optional, same as `on_color`/`off_color`/`hide_when`.
+- **Not persisted on the watch** — same as the dot on/off colors, HA is the source of truth for its own channels' styling. If you want a channel's colors to survive a watch restart/reconnect, resend them (they'll naturally be included in whatever `value`/`label` update triggered the change) — the watch will otherwise just show its all-default appearance for that channel until the next update arrives.
 
 ## Watch → HA: status reports (battery, health, device info)
 

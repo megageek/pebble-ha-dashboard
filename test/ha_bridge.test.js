@@ -114,7 +114,7 @@ function freshEnv() {
     return null;
   }
 
-  function sendChannelEvent(channel, value, label, onColor, offColor, hideWhen) {
+  function sendChannelEvent(channel, value, label, onColor, offColor, hideWhen, bgColor, valueColor, labelColor) {
     var data = { channel: channel, value: value };
     if (label !== undefined) {
       data.label = label;
@@ -127,6 +127,15 @@ function freshEnv() {
     }
     if (hideWhen !== undefined) {
       data.hide_when = hideWhen;
+    }
+    if (bgColor !== undefined) {
+      data.bg_color = bgColor;
+    }
+    if (valueColor !== undefined) {
+      data.value_color = valueColor;
+    }
+    if (labelColor !== undefined) {
+      data.label_color = labelColor;
     }
     lastSocket.onmessage({
       data: JSON.stringify({ id: subscriptionId(), type: "event", event: data }),
@@ -317,6 +326,26 @@ function freshEnv() {
       !("HA3_OFF_COLOR" in msg) &&
       !("HA3_HIDE_WHEN" in msg),
     "only the supplied dot-styling field is sent, got " + JSON.stringify(msg)
+  );
+})();
+
+// --- Test 6d: general-purpose bg_color/value_color/label_color relay
+// through to the watch as HAn_BG_COLOR/HAn_VALUE_COLOR/HAn_LABEL_COLOR,
+// independently of the dot on_color/off_color/hide_when fields above ---
+(function testChannelStylingColorsRelay() {
+  var env = freshEnv();
+  env.authenticate();
+
+  env.sendChannelEvent(1, "21.5C", "Temp", undefined, undefined, undefined, "purple", "yellow", "blue");
+
+  var msg = env.sentAppMessages[env.sentAppMessages.length - 1];
+  assert(
+    msg.HA1_BG_COLOR === "purple" && msg.HA1_VALUE_COLOR === "yellow" && msg.HA1_LABEL_COLOR === "blue",
+    "bg_color/value_color/label_color relayed correctly, got " + JSON.stringify(msg)
+  );
+  assert(
+    !("HA1_ON_COLOR" in msg) && !("HA1_OFF_COLOR" in msg) && !("HA1_HIDE_WHEN" in msg),
+    "dot on/off/hide-when fields stay independently optional, got " + JSON.stringify(msg)
   );
 })();
 

@@ -20,6 +20,14 @@
 #define PERSIST_KEY_CONN_OFF_COLOR 324
 #define PERSIST_KEY_CONN_HIDE_WHEN 325
 
+// General-purpose slot styling (background/value/label colors), Clay-
+// configurable per local channel; HA sets these directly on its own remote
+// channels over the wire instead (see inbox_received_callback()). Channel i
+// (index into local_color_channels[]) field f (0=bg,1=value,2=label) ->
+// PERSIST_KEY_LOCAL_COLOR_BASE + i*3 + f.
+#define NUM_LOCAL_COLOR_CHANNELS 13
+#define PERSIST_KEY_LOCAL_COLOR_BASE 400  // through 400 + 13*3 - 1 = 438
+
 typedef enum {
     CHANNEL_TIME,
     CHANNEL_DATE,
@@ -86,6 +94,16 @@ typedef struct {
     char on_color[8];
     char off_color[8];
     int8_t hide_when;
+    // General-purpose slot styling, independent of the dot on/off colors
+    // above — applies whenever this channel is drawn in any slot, not just
+    // as a dot. Empty string = "no override": falls back to whatever color
+    // the slot's size class would normally use (see draw_channel_text_aligned()/
+    // draw_channel_small_row()), so an unconfigured channel looks exactly
+    // like it always has. label_color only has an effect in SLOT_SIZE_SMALL,
+    // the only size class that renders a label at all.
+    char bg_color[8];
+    char value_color[8];
+    char label_color[8];
 } ChannelData;
 
 // A slot is a screen position from a layout template. Its size class
@@ -167,6 +185,19 @@ static const char *const REPORT_GROUP_NAMES[NUM_REPORT_GROUPS] = {
 // All enabled by default; persisted overrides loaded in load_config().
 static bool s_report_enabled[NUM_REPORT_GROUPS] = {
     true, true, true, true, true, true, true,
+};
+
+// The 13 local (non-HA) channels that get Clay-configurable background/
+// value/label colors — every channel except the 10 remote HA_1..HA_10
+// ones, which instead take these fields over the wire from HA itself (see
+// inbox_received_callback()). ChannelIndex values are compile-time enum
+// constants, unlike MESSAGE_KEY_* below, so this can be a static file-scope
+// array reused by both load_config() and inbox_received_callback().
+static const ChannelIndex local_color_channels[NUM_LOCAL_COLOR_CHANNELS] = {
+    CHANNEL_TIME, CHANNEL_DATE, CHANNEL_BATTERY, CHANNEL_STEPS,
+    CHANNEL_BATTERY_CHARGING, CHANNEL_CONNECTED, CHANNEL_ACTIVE_MINUTES, CHANNEL_DISTANCE,
+    CHANNEL_ACTIVE_KCAL, CHANNEL_RESTING_KCAL, CHANNEL_SLEEP_MINUTES, CHANNEL_SLEEP_RESTFUL_MINUTES,
+    CHANNEL_HEART_RATE,
 };
 
 static void init_channels(void) {
@@ -420,6 +451,26 @@ static void load_config(void) {
     if (persist_exists(PERSIST_KEY_CONN_HIDE_WHEN)) {
         s_channels[CHANNEL_CONNECTED].hide_when = (int8_t)persist_read_int(PERSIST_KEY_CONN_HIDE_WHEN);
     }
+
+    // General-purpose background/value/label colors for the 13 local
+    // channels. Empty (unset) is the default already left in place by
+    // init_channels(), so only overridden here if a Clay save persisted one.
+    for (int i = 0; i < NUM_LOCAL_COLOR_CHANNELS; i++) {
+        ChannelData *ch = &s_channels[local_color_channels[i]];
+        int bg_key = PERSIST_KEY_LOCAL_COLOR_BASE + i * 3 + 0;
+        int value_key = PERSIST_KEY_LOCAL_COLOR_BASE + i * 3 + 1;
+        int label_key = PERSIST_KEY_LOCAL_COLOR_BASE + i * 3 + 2;
+
+        if (persist_exists(bg_key)) {
+            persist_read_string(bg_key, ch->bg_color, sizeof(ch->bg_color));
+        }
+        if (persist_exists(value_key)) {
+            persist_read_string(value_key, ch->value_color, sizeof(ch->value_color));
+        }
+        if (persist_exists(label_key)) {
+            persist_read_string(label_key, ch->label_color, sizeof(ch->label_color));
+        }
+    }
 }
 
 static void mark_all_slots_dirty(void) {
@@ -450,6 +501,22 @@ static void separator_update_proc(Layer *layer, GContext *ctx) {
     graphics_draw_line(ctx, GPoint(0, 0), GPoint(bounds.size.w, 0));
 }
 
+// Named palette shared with Clay (local channel color pickers) and with
+// HA (on_color/off_color fields in pebble_channel_update) — see
+// HA_INTEGRATION_SPEC.md. Unrecognized/empty names fall back to light gray
+// rather than failing, since a color typo shouldn't crash rendering.
+static GColor color_from_name(const char *name) {
+    if (strcmp(name, "red") == 0) return GColorRed;
+    if (strcmp(name, "orange") == 0) return GColorOrange;
+    if (strcmp(name, "yellow") == 0) return GColorYellow;
+    if (strcmp(name, "green") == 0) return GColorGreen;
+    if (strcmp(name, "blue") == 0) return GColorBlue;
+    if (strcmp(name, "purple") == 0) return GColorPurple;
+    if (strcmp(name, "white") == 0) return GColorWhite;
+    if (strcmp(name, "gray") == 0) return GColorLightGray;
+    return GColorLightGray;
+}
+
 static void draw_channel_bar(GContext *ctx, GRect bounds, ChannelData *ch) {
     const int bar_height = 12;
     GRect bar_frame = GRect(bounds.origin.x, bounds.origin.y + (bounds.size.h - bar_height) / 2,
@@ -476,8 +543,12 @@ static void draw_channel_bar(GContext *ctx, GRect bounds, ChannelData *ch) {
     }
 }
 
+// `default_color` is whatever the caller's size class would normally use;
+// ch->value_color (Clay/HA-configurable, see ChannelData) overrides it when
+// set, falling back to default_color when empty so an unconfigured channel
+// renders exactly as before this option existed.
 static void draw_channel_text_aligned(GContext *ctx, GRect bounds, ChannelData *ch,
-                                       GFont font, GTextAlignment alignment, GColor color) {
+                                       GFont font, GTextAlignment alignment, GColor default_color) {
     char buffer[24];
     const char *text = buffer;
 
@@ -498,6 +569,7 @@ static void draw_channel_text_aligned(GContext *ctx, GRect bounds, ChannelData *
             break;
     }
 
+    GColor color = ch->value_color[0] != '\0' ? color_from_name(ch->value_color) : default_color;
     graphics_context_set_text_color(ctx, color);
     graphics_draw_text(ctx, text, font, bounds, GTextOverflowModeTrailingEllipsis, alignment, NULL);
 }
@@ -507,7 +579,8 @@ static void draw_channel_small_row(GContext *ctx, GRect bounds, ChannelData *ch)
     GRect label_rect = GRect(bounds.origin.x + 14, bounds.origin.y, half - 14, bounds.size.h);
     GRect value_rect = GRect(bounds.origin.x + half, bounds.origin.y, half - 14, bounds.size.h);
 
-    graphics_context_set_text_color(ctx, GColorLightGray);
+    GColor label_color = ch->label_color[0] != '\0' ? color_from_name(ch->label_color) : GColorLightGray;
+    graphics_context_set_text_color(ctx, label_color);
     graphics_draw_text(ctx, ch->label, fonts_get_system_font(FONT_KEY_GOTHIC_18_BOLD), label_rect,
                         GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
 
@@ -524,22 +597,6 @@ static void draw_channel_small_row(GContext *ctx, GRect bounds, ChannelData *ch)
 // measures that don't warrant a full label+value slot. See
 // CHANNEL_DOT_GROUP_MARKER / s_dot_channels above.
 // ---------------------------------------------------------------------------
-
-// Named palette shared with Clay (local channel color pickers) and with
-// HA (on_color/off_color fields in pebble_channel_update) — see
-// HA_INTEGRATION_SPEC.md. Unrecognized/empty names fall back to light gray
-// rather than failing, since a color typo shouldn't crash rendering.
-static GColor color_from_name(const char *name) {
-    if (strcmp(name, "red") == 0) return GColorRed;
-    if (strcmp(name, "orange") == 0) return GColorOrange;
-    if (strcmp(name, "yellow") == 0) return GColorYellow;
-    if (strcmp(name, "green") == 0) return GColorGreen;
-    if (strcmp(name, "blue") == 0) return GColorBlue;
-    if (strcmp(name, "purple") == 0) return GColorPurple;
-    if (strcmp(name, "white") == 0) return GColorWhite;
-    if (strcmp(name, "gray") == 0) return GColorLightGray;
-    return GColorLightGray;
-}
 
 // "none"/"on"/"off" -> 0/1/2. Same three-value vocabulary for Clay's local
 // hide-when select and HA's hide_when field.
@@ -616,6 +673,15 @@ static void slot_update_proc(Layer *layer, GContext *ctx) {
     SlotRenderInfo *info = layer_get_data(layer);
     GRect bounds = layer_get_bounds(layer);
     ChannelData *ch = &s_channels[info->channel_index];
+
+    // Empty bg_color (the default) means "no override" — leave the
+    // window's own black background showing through, exactly as before
+    // this option existed. Filled first, under everything else in the
+    // slot (dots included), since it's a whole-slot background.
+    if (ch->bg_color[0] != '\0') {
+        graphics_context_set_fill_color(ctx, color_from_name(ch->bg_color));
+        graphics_fill_rect(ctx, bounds, 0, GCornerNone);
+    }
 
     // Dots reserve a strip on the right, narrowing (not replacing) the
     // area available to the slot's normal channel content — the dots are
@@ -1042,6 +1108,25 @@ static void inbox_received_callback(DictionaryIterator *iterator, void *context)
         MESSAGE_KEY_HA5_HIDE_WHEN, MESSAGE_KEY_HA6_HIDE_WHEN, MESSAGE_KEY_HA7_HIDE_WHEN, MESSAGE_KEY_HA8_HIDE_WHEN,
         MESSAGE_KEY_HA9_HIDE_WHEN, MESSAGE_KEY_HA10_HIDE_WHEN,
     };
+    // General-purpose slot styling HA can send alongside value/label — same
+    // idea as on_color/off_color above but for a channel's normal (non-dot)
+    // appearance. Not persisted on the watch; HA is the source of truth and
+    // resends these on every reconnect via the initial subscribe result.
+    const uint32_t ha_bg_color_keys[NUM_HA_CHANNELS] = {
+        MESSAGE_KEY_HA1_BG_COLOR, MESSAGE_KEY_HA2_BG_COLOR, MESSAGE_KEY_HA3_BG_COLOR, MESSAGE_KEY_HA4_BG_COLOR,
+        MESSAGE_KEY_HA5_BG_COLOR, MESSAGE_KEY_HA6_BG_COLOR, MESSAGE_KEY_HA7_BG_COLOR, MESSAGE_KEY_HA8_BG_COLOR,
+        MESSAGE_KEY_HA9_BG_COLOR, MESSAGE_KEY_HA10_BG_COLOR,
+    };
+    const uint32_t ha_value_color_keys[NUM_HA_CHANNELS] = {
+        MESSAGE_KEY_HA1_VALUE_COLOR, MESSAGE_KEY_HA2_VALUE_COLOR, MESSAGE_KEY_HA3_VALUE_COLOR, MESSAGE_KEY_HA4_VALUE_COLOR,
+        MESSAGE_KEY_HA5_VALUE_COLOR, MESSAGE_KEY_HA6_VALUE_COLOR, MESSAGE_KEY_HA7_VALUE_COLOR, MESSAGE_KEY_HA8_VALUE_COLOR,
+        MESSAGE_KEY_HA9_VALUE_COLOR, MESSAGE_KEY_HA10_VALUE_COLOR,
+    };
+    const uint32_t ha_label_color_keys[NUM_HA_CHANNELS] = {
+        MESSAGE_KEY_HA1_LABEL_COLOR, MESSAGE_KEY_HA2_LABEL_COLOR, MESSAGE_KEY_HA3_LABEL_COLOR, MESSAGE_KEY_HA4_LABEL_COLOR,
+        MESSAGE_KEY_HA5_LABEL_COLOR, MESSAGE_KEY_HA6_LABEL_COLOR, MESSAGE_KEY_HA7_LABEL_COLOR, MESSAGE_KEY_HA8_LABEL_COLOR,
+        MESSAGE_KEY_HA9_LABEL_COLOR, MESSAGE_KEY_HA10_LABEL_COLOR,
+    };
     const ChannelIndex ha_channels[NUM_HA_CHANNELS] = {
         CHANNEL_HA_1, CHANNEL_HA_2, CHANNEL_HA_3, CHANNEL_HA_4, CHANNEL_HA_5,
         CHANNEL_HA_6, CHANNEL_HA_7, CHANNEL_HA_8, CHANNEL_HA_9, CHANNEL_HA_10,
@@ -1082,6 +1167,27 @@ static void inbox_received_callback(DictionaryIterator *iterator, void *context)
         Tuple *hide_when_tuple = dict_find(iterator, ha_hide_when_keys[i]);
         if (hide_when_tuple && hide_when_tuple->type == TUPLE_CSTRING) {
             ch->hide_when = parse_hide_when(hide_when_tuple->value->cstring);
+            value_changed = true;
+        }
+
+        Tuple *bg_color_tuple = dict_find(iterator, ha_bg_color_keys[i]);
+        if (bg_color_tuple && bg_color_tuple->type == TUPLE_CSTRING) {
+            strncpy(ch->bg_color, bg_color_tuple->value->cstring, sizeof(ch->bg_color) - 1);
+            ch->bg_color[sizeof(ch->bg_color) - 1] = '\0';
+            value_changed = true;
+        }
+
+        Tuple *value_color_tuple = dict_find(iterator, ha_value_color_keys[i]);
+        if (value_color_tuple && value_color_tuple->type == TUPLE_CSTRING) {
+            strncpy(ch->value_color, value_color_tuple->value->cstring, sizeof(ch->value_color) - 1);
+            ch->value_color[sizeof(ch->value_color) - 1] = '\0';
+            value_changed = true;
+        }
+
+        Tuple *label_color_tuple = dict_find(iterator, ha_label_color_keys[i]);
+        if (label_color_tuple && label_color_tuple->type == TUPLE_CSTRING) {
+            strncpy(ch->label_color, label_color_tuple->value->cstring, sizeof(ch->label_color) - 1);
+            ch->label_color[sizeof(ch->label_color) - 1] = '\0';
             value_changed = true;
         }
     }
@@ -1165,7 +1271,63 @@ static void inbox_received_callback(DictionaryIterator *iterator, void *context)
         dot_config_changed = true;
     }
 
-    if (!layout_changed && !value_changed && !reporting_config_changed && !dot_config_changed) {
+    // General-purpose background/value/label colors for the 13 local
+    // channels (see local_color_channels[] above) — Clay-only; HA channels
+    // get the equivalent fields directly in the HA-channel loop above.
+    // Doesn't affect slot rects/count, so redraw-only like the dot config.
+    bool color_config_changed = false;
+    const uint32_t local_bg_color_keys[NUM_LOCAL_COLOR_CHANNELS] = {
+        MESSAGE_KEY_TIME_BG_COLOR, MESSAGE_KEY_DATE_BG_COLOR, MESSAGE_KEY_BATTERY_BG_COLOR, MESSAGE_KEY_STEPS_BG_COLOR,
+        MESSAGE_KEY_CHARGE_BG_COLOR, MESSAGE_KEY_CONN_BG_COLOR, MESSAGE_KEY_ACTIVE_MINUTES_BG_COLOR, MESSAGE_KEY_DISTANCE_BG_COLOR,
+        MESSAGE_KEY_ACTIVE_KCAL_BG_COLOR, MESSAGE_KEY_RESTING_KCAL_BG_COLOR, MESSAGE_KEY_SLEEP_MINUTES_BG_COLOR,
+        MESSAGE_KEY_SLEEP_RESTFUL_MINUTES_BG_COLOR, MESSAGE_KEY_HEART_RATE_BG_COLOR,
+    };
+    const uint32_t local_value_color_keys[NUM_LOCAL_COLOR_CHANNELS] = {
+        MESSAGE_KEY_TIME_VALUE_COLOR, MESSAGE_KEY_DATE_VALUE_COLOR, MESSAGE_KEY_BATTERY_VALUE_COLOR, MESSAGE_KEY_STEPS_VALUE_COLOR,
+        MESSAGE_KEY_CHARGE_VALUE_COLOR, MESSAGE_KEY_CONN_VALUE_COLOR, MESSAGE_KEY_ACTIVE_MINUTES_VALUE_COLOR, MESSAGE_KEY_DISTANCE_VALUE_COLOR,
+        MESSAGE_KEY_ACTIVE_KCAL_VALUE_COLOR, MESSAGE_KEY_RESTING_KCAL_VALUE_COLOR, MESSAGE_KEY_SLEEP_MINUTES_VALUE_COLOR,
+        MESSAGE_KEY_SLEEP_RESTFUL_MINUTES_VALUE_COLOR, MESSAGE_KEY_HEART_RATE_VALUE_COLOR,
+    };
+    const uint32_t local_label_color_keys[NUM_LOCAL_COLOR_CHANNELS] = {
+        MESSAGE_KEY_TIME_LABEL_COLOR, MESSAGE_KEY_DATE_LABEL_COLOR, MESSAGE_KEY_BATTERY_LABEL_COLOR, MESSAGE_KEY_STEPS_LABEL_COLOR,
+        MESSAGE_KEY_CHARGE_LABEL_COLOR, MESSAGE_KEY_CONN_LABEL_COLOR, MESSAGE_KEY_ACTIVE_MINUTES_LABEL_COLOR, MESSAGE_KEY_DISTANCE_LABEL_COLOR,
+        MESSAGE_KEY_ACTIVE_KCAL_LABEL_COLOR, MESSAGE_KEY_RESTING_KCAL_LABEL_COLOR, MESSAGE_KEY_SLEEP_MINUTES_LABEL_COLOR,
+        MESSAGE_KEY_SLEEP_RESTFUL_MINUTES_LABEL_COLOR, MESSAGE_KEY_HEART_RATE_LABEL_COLOR,
+    };
+
+    for (int i = 0; i < NUM_LOCAL_COLOR_CHANNELS; i++) {
+        ChannelData *ch = &s_channels[local_color_channels[i]];
+        int bg_key = PERSIST_KEY_LOCAL_COLOR_BASE + i * 3 + 0;
+        int value_key = PERSIST_KEY_LOCAL_COLOR_BASE + i * 3 + 1;
+        int label_key = PERSIST_KEY_LOCAL_COLOR_BASE + i * 3 + 2;
+
+        Tuple *bg_tuple = dict_find(iterator, local_bg_color_keys[i]);
+        if (bg_tuple && bg_tuple->type == TUPLE_CSTRING) {
+            strncpy(ch->bg_color, bg_tuple->value->cstring, sizeof(ch->bg_color) - 1);
+            ch->bg_color[sizeof(ch->bg_color) - 1] = '\0';
+            persist_write_string(bg_key, ch->bg_color);
+            color_config_changed = true;
+        }
+
+        Tuple *value_tuple = dict_find(iterator, local_value_color_keys[i]);
+        if (value_tuple && value_tuple->type == TUPLE_CSTRING) {
+            strncpy(ch->value_color, value_tuple->value->cstring, sizeof(ch->value_color) - 1);
+            ch->value_color[sizeof(ch->value_color) - 1] = '\0';
+            persist_write_string(value_key, ch->value_color);
+            color_config_changed = true;
+        }
+
+        Tuple *label_tuple = dict_find(iterator, local_label_color_keys[i]);
+        if (label_tuple && label_tuple->type == TUPLE_CSTRING) {
+            strncpy(ch->label_color, label_tuple->value->cstring, sizeof(ch->label_color) - 1);
+            ch->label_color[sizeof(ch->label_color) - 1] = '\0';
+            persist_write_string(label_key, ch->label_color);
+            color_config_changed = true;
+        }
+    }
+
+    if (!layout_changed && !value_changed && !reporting_config_changed && !dot_config_changed
+        && !color_config_changed) {
         return;
     }
 
@@ -1179,7 +1341,7 @@ static void inbox_received_callback(DictionaryIterator *iterator, void *context)
         update_battery();
         update_steps();
         update_health_channels();
-    } else if (value_changed || dot_config_changed) {
+    } else if (value_changed || dot_config_changed || color_config_changed) {
         mark_all_slots_dirty();
     }
 

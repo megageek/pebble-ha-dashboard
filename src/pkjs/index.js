@@ -39,6 +39,45 @@ var WATCH_SETTINGS_KEYS = [
   "CONN_ON_COLOR",
   "CONN_OFF_COLOR",
   "CONN_HIDE_WHEN",
+  "TIME_BG_COLOR",
+  "TIME_VALUE_COLOR",
+  "TIME_LABEL_COLOR",
+  "DATE_BG_COLOR",
+  "DATE_VALUE_COLOR",
+  "DATE_LABEL_COLOR",
+  "BATTERY_BG_COLOR",
+  "BATTERY_VALUE_COLOR",
+  "BATTERY_LABEL_COLOR",
+  "STEPS_BG_COLOR",
+  "STEPS_VALUE_COLOR",
+  "STEPS_LABEL_COLOR",
+  "CHARGE_BG_COLOR",
+  "CHARGE_VALUE_COLOR",
+  "CHARGE_LABEL_COLOR",
+  "CONN_BG_COLOR",
+  "CONN_VALUE_COLOR",
+  "CONN_LABEL_COLOR",
+  "ACTIVE_MINUTES_BG_COLOR",
+  "ACTIVE_MINUTES_VALUE_COLOR",
+  "ACTIVE_MINUTES_LABEL_COLOR",
+  "DISTANCE_BG_COLOR",
+  "DISTANCE_VALUE_COLOR",
+  "DISTANCE_LABEL_COLOR",
+  "ACTIVE_KCAL_BG_COLOR",
+  "ACTIVE_KCAL_VALUE_COLOR",
+  "ACTIVE_KCAL_LABEL_COLOR",
+  "RESTING_KCAL_BG_COLOR",
+  "RESTING_KCAL_VALUE_COLOR",
+  "RESTING_KCAL_LABEL_COLOR",
+  "SLEEP_MINUTES_BG_COLOR",
+  "SLEEP_MINUTES_VALUE_COLOR",
+  "SLEEP_MINUTES_LABEL_COLOR",
+  "SLEEP_RESTFUL_MINUTES_BG_COLOR",
+  "SLEEP_RESTFUL_MINUTES_VALUE_COLOR",
+  "SLEEP_RESTFUL_MINUTES_LABEL_COLOR",
+  "HEART_RATE_BG_COLOR",
+  "HEART_RATE_VALUE_COLOR",
+  "HEART_RATE_LABEL_COLOR",
 ];
 
 Pebble.addEventListener("showConfiguration", function () {
@@ -141,12 +180,12 @@ function scheduleHaReconnect() {
   haReconnectDelay = Math.min(haReconnectDelay * 2, RECONNECT_MAX_DELAY_MS);
 }
 
-// onColor/offColor/hideWhen are optional — see HA_INTEGRATION_SPEC.md.
-// Their presence isn't what marks a channel as dot-capable (any channel
-// can be assigned into the dot group on the watch side); they just style
-// it if it is. hideWhen must be "none"/"on"/"off" (see parse_hide_when()
-// on the C side).
-function sendHaChannelToWatch(channel, value, label, onColor, offColor, hideWhen) {
+// onColor/offColor/hideWhen/bgColor/valueColor/labelColor are all optional —
+// see HA_INTEGRATION_SPEC.md. Their presence isn't what marks a channel as
+// dot-capable or styleable (any channel can be assigned into the dot group,
+// and always renders in whatever slot holds it); they just style it if set.
+// hideWhen must be "none"/"on"/"off" (see parse_hide_when() on the C side).
+function sendHaChannelToWatch(channel, value, label, onColor, offColor, hideWhen, bgColor, valueColor, labelColor) {
   var channelNum = Number(channel);
   if (!(channelNum >= 1 && channelNum <= NUM_HA_CHANNELS)) {
     console.log("Ignoring HA update for unknown channel: " + channel);
@@ -166,6 +205,15 @@ function sendHaChannelToWatch(channel, value, label, onColor, offColor, hideWhen
   }
   if (hideWhen !== undefined && hideWhen !== null) {
     dict["HA" + channelNum + "_HIDE_WHEN"] = String(hideWhen).substring(0, 4);
+  }
+  if (bgColor !== undefined && bgColor !== null) {
+    dict["HA" + channelNum + "_BG_COLOR"] = String(bgColor).substring(0, 7);
+  }
+  if (valueColor !== undefined && valueColor !== null) {
+    dict["HA" + channelNum + "_VALUE_COLOR"] = String(valueColor).substring(0, 7);
+  }
+  if (labelColor !== undefined && labelColor !== null) {
+    dict["HA" + channelNum + "_LABEL_COLOR"] = String(labelColor).substring(0, 7);
   }
 
   Pebble.sendAppMessage(
@@ -261,14 +309,16 @@ function connectToHomeAssistant() {
       channels.forEach(function (item) {
         sendHaChannelToWatch(
           item.channel, item.value, item.label,
-          item.on_color, item.off_color, item.hide_when
+          item.on_color, item.off_color, item.hide_when,
+          item.bg_color, item.value_color, item.label_color
         );
       });
     } else if (message.id === haSubscriptionId && message.type === "event") {
       var item = message.event || {};
       sendHaChannelToWatch(
         item.channel, item.value, item.label,
-        item.on_color, item.off_color, item.hide_when
+        item.on_color, item.off_color, item.hide_when,
+        item.bg_color, item.value_color, item.label_color
       );
     }
   };

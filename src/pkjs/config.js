@@ -4,8 +4,10 @@
 // src/c/main.c: 0=TIME, 1=DATE, 2=BATTERY, 3=STEPS, 4=HA1, 5=HA2, 6=HA3,
 // 7=BATTERY_CHARGING, 8=CONNECTED, 9=ACTIVE_MINUTES, 10=DISTANCE,
 // 11=ACTIVE_KCAL, 12=RESTING_KCAL, 13=SLEEP_MINUTES, 14=SLEEP_RESTFUL_MINUTES,
-// 15=HEART_RATE. The new ones (7-15) are appended after the original 7 so a
-// previously-persisted slot assignment keeps meaning the same channel.
+// 15=HEART_RATE, 16=HA4, 17=HA5, 18=HA6, 19=HA7, 20=HA8, 21=HA9, 22=HA10.
+// The new ones (7-15, then 16-22) are each appended after whatever came
+// before them rather than interleaved, so a previously-persisted slot
+// assignment keeps meaning the same channel.
 var CHANNEL_OPTIONS = [
   { label: "Time", value: 0 },
   { label: "Date", value: 1 },
@@ -23,6 +25,13 @@ var CHANNEL_OPTIONS = [
   { label: "Sleep minutes", value: 13 },
   { label: "Restful sleep minutes", value: 14 },
   { label: "Heart rate", value: 15 },
+  { label: "HA channel 4", value: 16 },
+  { label: "HA channel 5", value: 17 },
+  { label: "HA channel 6", value: 18 },
+  { label: "HA channel 7", value: 19 },
+  { label: "HA channel 8", value: 20 },
+  { label: "HA channel 9", value: 21 },
+  { label: "HA channel 10", value: 22 },
 ];
 
 function slotSelect(slotIndex, defaultChannel) {
@@ -36,7 +45,7 @@ function slotSelect(slotIndex, defaultChannel) {
 }
 
 // Only channels that can meaningfully be "on"/"off" make sense as a status
-// dot — local binary channels, plus the 3 HA channels (which can carry
+// dot — local binary channels, plus the 10 HA channels (which can carry
 // whatever on/off meaning HA gives them via value="on"/"off").
 var DOT_CHANNEL_OPTIONS = [
   { label: "None", value: -1 },
@@ -45,6 +54,13 @@ var DOT_CHANNEL_OPTIONS = [
   { label: "HA channel 1", value: 4 },
   { label: "HA channel 2", value: 5 },
   { label: "HA channel 3", value: 6 },
+  { label: "HA channel 4", value: 16 },
+  { label: "HA channel 5", value: 17 },
+  { label: "HA channel 6", value: 18 },
+  { label: "HA channel 7", value: 19 },
+  { label: "HA channel 8", value: 20 },
+  { label: "HA channel 9", value: 21 },
+  { label: "HA channel 10", value: 22 },
 ];
 
 // Shared with HA's on_color/off_color fields (see HA_INTEGRATION_SPEC.md)
@@ -120,8 +136,9 @@ module.exports = [
   {
     type: "text",
     defaultValue:
-      "Both templates have 5 slots. Slots beyond what the chosen " +
-      "template uses are ignored.",
+      "Both current templates use only the first 5 slots. Slots 6-10 " +
+      "are here for future/custom layouts and are ignored by either " +
+      "template today.",
   },
   // Defaults mirror Template 0's slot assignments (see build_template_0
   // in main.c): hero=Time, medium=Date, small rows=Battery/Steps/HA1.
@@ -130,6 +147,12 @@ module.exports = [
   slotSelect(2, 2),
   slotSelect(3, 3),
   slotSelect(4, 4),
+  // Slots 5-9: not used by either built-in template, default is arbitrary.
+  slotSelect(5, 0),
+  slotSelect(6, 0),
+  slotSelect(7, 0),
+  slotSelect(8, 0),
+  slotSelect(9, 0),
   {
     type: "heading",
     defaultValue: "Status Dots",
@@ -154,6 +177,11 @@ module.exports = [
       { label: "Slot 3", value: 2 },
       { label: "Slot 4", value: 3 },
       { label: "Slot 5", value: 4 },
+      { label: "Slot 6", value: 5 },
+      { label: "Slot 7", value: 6 },
+      { label: "Slot 8", value: 7 },
+      { label: "Slot 9", value: 8 },
+      { label: "Slot 10", value: 9 },
     ],
   },
   dotChannelSelect(0),

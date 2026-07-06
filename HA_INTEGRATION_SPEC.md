@@ -70,7 +70,7 @@ If the integration isn't installed at all, HA responds to any unrecognized comma
 }
 ```
 
-- **`channel`** — integer `1`, `2`, or `3`. There are exactly **3 channels** in the current watchface (`CHANNEL_HA_1`/`CHANNEL_HA_2`/`CHANNEL_HA_3` on the watch side). Any other value (0, 4+, non-numeric) is silently ignored by the phone — not an error, just dropped.
+- **`channel`** — integer `1` through `10`. There are exactly **10 channels** in the current watchface (`CHANNEL_HA_1`…`CHANNEL_HA_10` on the watch side). Any other value (0, 11+, non-numeric) is silently ignored by the phone — not an error, just dropped.
 - **`value`** — required. Always treated as a **plain string** by the watch today; there is no numeric/unit-aware channel type on the HA side yet, even though the watch's internal channel model supports that kind for local channels (battery, steps). A temperature should be sent as a fully-formatted string like `"21.5°C"`, not a bare number — the watch will display exactly what's sent, with no unit suffix or number formatting applied. **If this channel is ever displayed as a status dot** (see below — entirely the watch user's choice, not something HA controls), send the literal lowercase string `"on"` or `"off"` so the watch can tell which dot color to use; any other value is always treated as "off" for dot purposes, no case-insensitive or fuzzy matching.
 - **`label`** — optional. If omitted, the watch keeps showing whatever label it last had for that channel (including the compiled-in default, e.g. `"HA1"`, if none has ever been sent). Only send it when it changes or on the first update for a channel.
 - **`on_color`/`off_color`** — optional, only relevant if the watch user has put this channel in their status-dot group (see below). A name from the shared palette: `red`, `orange`, `yellow`, `green`, `blue`, `purple`, `white`, `gray`. Unrecognized/misspelled names fall back to gray rather than erroring. If never sent, the watch defaults both to green/red.
@@ -127,7 +127,7 @@ Each measure group (`battery`, `steps`, `activity`, `sleep`, `heart_rate`, `conn
 ## What's *not* in this contract
 
 - **No numeric or binary channel kinds from HA yet.** Everything arrives and displays as text. If a future watchface version wants a real progress-bar-style HA channel (like battery today) or an ON/OFF-styled one (like a switch entity), that needs new message keys and C-side handling — this spec covers only what exists now.
-- **No entity-to-channel mapping convention is prescribed here.** How a specific HA entity gets assigned to channel 1 vs 2 vs 3 (a config flow option, YAML, a dashboard helper, whatever) is entirely up to the integration's design — the watch and phone only know about channel numbers 1–3, never entity IDs.
+- **No entity-to-channel mapping convention is prescribed here.** How a specific HA entity gets assigned to a channel number (a config flow option, YAML, a dashboard helper, whatever) is entirely up to the integration's design — the watch and phone only know about channel numbers 1–10, never entity IDs.
 - **No explicit unsubscribe command from the phone.** The phone never sends one; it just closes/replaces the connection (e.g. on reconnect or when Home Assistant config is re-saved). The integration should treat connection close as the unsubscribe signal, per HA's standard subscription cleanup pattern, rather than expecting an explicit unsubscribe message.
 
 ## Quick reference

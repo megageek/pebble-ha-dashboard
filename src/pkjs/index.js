@@ -15,6 +15,11 @@ var WATCH_SETTINGS_KEYS = [
   "SLOT_2_CHANNEL",
   "SLOT_3_CHANNEL",
   "SLOT_4_CHANNEL",
+  "SLOT_5_CHANNEL",
+  "SLOT_6_CHANNEL",
+  "SLOT_7_CHANNEL",
+  "SLOT_8_CHANNEL",
+  "SLOT_9_CHANNEL",
   "REPORT_ENABLE_BATTERY",
   "REPORT_ENABLE_STEPS",
   "REPORT_ENABLE_ACTIVITY",
@@ -95,7 +100,7 @@ Pebble.addEventListener("webviewclosed", function (e) {
 // in the HA integration), not a core command — it isn't admin-gated unless
 // the integration explicitly adds that, unlike fire_event.
 var HA_SUBSCRIBE_COMMAND = "pebble_dashboard/subscribe_channels";
-var NUM_HA_CHANNELS = 3;
+var NUM_HA_CHANNELS = 10;
 var RECONNECT_BASE_DELAY_MS = 2000;
 var RECONNECT_MAX_DELAY_MS = 30000;
 

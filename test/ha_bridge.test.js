@@ -206,7 +206,7 @@ function freshEnv() {
   env.sendInitialResult([
     { channel: 1, value: "72F", label: "Temp" },
     { channel: 2, value: "Closed" }, // no label — channel keeps its default
-    { channel: 9, value: "ignored" }, // out of range, must not relay
+    { channel: 11, value: "ignored" }, // out of range, must not relay
   ]);
 
   assert(env.sentAppMessages.length === 2, "relayed 2 AppMessages from the initial result, got " + env.sentAppMessages.length);
@@ -326,10 +326,30 @@ function freshEnv() {
   env.authenticate();
 
   env.sendChannelEvent(0, "x", "y");
-  env.sendChannelEvent(4, "x", "y");
+  env.sendChannelEvent(11, "x", "y");
   env.sendChannelEvent("not-a-number", "x", "y");
 
   assert(env.sentAppMessages.length === 0, "no AppMessage sent for out-of-range channels, got " + env.sentAppMessages.length);
+})();
+
+// --- Test 7b: channels 4-10 (the boosted range) relay just as channels
+// 1-3 always have, via the same generic "HA" + channelNum key building ---
+(function testExtendedChannelRangeRelays() {
+  var env = freshEnv();
+  env.authenticate();
+
+  env.sendChannelEvent(4, "on", "Fan");
+  env.sendChannelEvent(10, "68F", "Attic");
+
+  assert(env.sentAppMessages.length === 2, "relayed both extended-range channels, got " + env.sentAppMessages.length);
+  assert(
+    env.sentAppMessages[0].HA4_VALUE === "on" && env.sentAppMessages[0].HA4_LABEL === "Fan",
+    "channel 4 relayed correctly, got " + JSON.stringify(env.sentAppMessages[0])
+  );
+  assert(
+    env.sentAppMessages[1].HA10_VALUE === "68F" && env.sentAppMessages[1].HA10_LABEL === "Attic",
+    "channel 10 (the new upper bound) relayed correctly, got " + JSON.stringify(env.sentAppMessages[1])
+  );
 })();
 
 // --- Test 8: reconnect backoff doubles on repeated drops, resets after auth_ok ---

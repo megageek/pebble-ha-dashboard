@@ -1,8 +1,8 @@
 #include <pebble.h>
 
-#define MAX_SLOTS 8
-#define NUM_CONFIGURABLE_SLOTS 5  // must match the SLOT_n_CHANNEL messageKeys in package.json
-#define NUM_HA_CHANNELS 3  // must match the HAn_VALUE/HAn_LABEL messageKeys in package.json
+#define MAX_SLOTS 10
+#define NUM_CONFIGURABLE_SLOTS 10  // must match the SLOT_n_CHANNEL messageKeys in package.json
+#define NUM_HA_CHANNELS 10  // must match the HAn_VALUE/HAn_LABEL messageKeys in package.json
 
 #define PERSIST_KEY_TEMPLATE 100
 #define PERSIST_KEY_SLOT_BASE 101  // slot i -> PERSIST_KEY_SLOT_BASE + i
@@ -42,6 +42,17 @@ typedef enum {
     CHANNEL_SLEEP_MINUTES,
     CHANNEL_SLEEP_RESTFUL_MINUTES,
     CHANNEL_HEART_RATE,
+    // HA channels 4-10, appended after the original 16 (not next to
+    // HA_1..HA_3) for the same reason the 9 local channels above were
+    // appended after the original 7: a previously-persisted SLOT_n_CHANNEL
+    // value must keep meaning the same channel across this update.
+    CHANNEL_HA_4,
+    CHANNEL_HA_5,
+    CHANNEL_HA_6,
+    CHANNEL_HA_7,
+    CHANNEL_HA_8,
+    CHANNEL_HA_9,
+    CHANNEL_HA_10,
     NUM_CHANNELS,
 } ChannelIndex;
 
@@ -120,7 +131,7 @@ static int s_slot_channel_override[NUM_CONFIGURABLE_SLOTS];
 // configurable slot index s_dot_group_slot names — additively, alongside
 // that slot's normal channel content, not replacing it. -1 = disabled /
 // no channel assigned to that dot position.
-static int s_dot_group_slot = -1;  // which of the 5 configurable slots also shows dots; -1 = none
+static int s_dot_group_slot = -1;  // which of the 10 configurable slots also shows dots; -1 = none
 static int s_dot_channels[MAX_DOTS];
 
 // Dot size is user-configurable (Clay), not a fixed constant — defaults to
@@ -188,6 +199,34 @@ static void init_channels(void) {
     };
     s_channels[CHANNEL_HA_3] = (ChannelData) {
         .kind = CHANNEL_KIND_TEXT, .style = CHANNEL_STYLE_RAW, .label = "HA3", .text = "--",
+        .on_color = "green", .off_color = "red",
+    };
+    s_channels[CHANNEL_HA_4] = (ChannelData) {
+        .kind = CHANNEL_KIND_TEXT, .style = CHANNEL_STYLE_RAW, .label = "HA4", .text = "--",
+        .on_color = "green", .off_color = "red",
+    };
+    s_channels[CHANNEL_HA_5] = (ChannelData) {
+        .kind = CHANNEL_KIND_TEXT, .style = CHANNEL_STYLE_RAW, .label = "HA5", .text = "--",
+        .on_color = "green", .off_color = "red",
+    };
+    s_channels[CHANNEL_HA_6] = (ChannelData) {
+        .kind = CHANNEL_KIND_TEXT, .style = CHANNEL_STYLE_RAW, .label = "HA6", .text = "--",
+        .on_color = "green", .off_color = "red",
+    };
+    s_channels[CHANNEL_HA_7] = (ChannelData) {
+        .kind = CHANNEL_KIND_TEXT, .style = CHANNEL_STYLE_RAW, .label = "HA7", .text = "--",
+        .on_color = "green", .off_color = "red",
+    };
+    s_channels[CHANNEL_HA_8] = (ChannelData) {
+        .kind = CHANNEL_KIND_TEXT, .style = CHANNEL_STYLE_RAW, .label = "HA8", .text = "--",
+        .on_color = "green", .off_color = "red",
+    };
+    s_channels[CHANNEL_HA_9] = (ChannelData) {
+        .kind = CHANNEL_KIND_TEXT, .style = CHANNEL_STYLE_RAW, .label = "HA9", .text = "--",
+        .on_color = "green", .off_color = "red",
+    };
+    s_channels[CHANNEL_HA_10] = (ChannelData) {
+        .kind = CHANNEL_KIND_TEXT, .style = CHANNEL_STYLE_RAW, .label = "HA10", .text = "--",
         .on_color = "green", .off_color = "red",
     };
 
@@ -954,7 +993,9 @@ static void inbox_received_callback(DictionaryIterator *iterator, void *context)
 
     const uint32_t slot_keys[NUM_CONFIGURABLE_SLOTS] = {
         MESSAGE_KEY_SLOT_0_CHANNEL, MESSAGE_KEY_SLOT_1_CHANNEL, MESSAGE_KEY_SLOT_2_CHANNEL,
-        MESSAGE_KEY_SLOT_3_CHANNEL, MESSAGE_KEY_SLOT_4_CHANNEL,
+        MESSAGE_KEY_SLOT_3_CHANNEL, MESSAGE_KEY_SLOT_4_CHANNEL, MESSAGE_KEY_SLOT_5_CHANNEL,
+        MESSAGE_KEY_SLOT_6_CHANNEL, MESSAGE_KEY_SLOT_7_CHANNEL, MESSAGE_KEY_SLOT_8_CHANNEL,
+        MESSAGE_KEY_SLOT_9_CHANNEL,
     };
     for (int i = 0; i < NUM_CONFIGURABLE_SLOTS; i++) {
         Tuple *tuple = dict_find(iterator, slot_keys[i]);
@@ -973,25 +1014,38 @@ static void inbox_received_callback(DictionaryIterator *iterator, void *context)
     // redraws the affected slots — never a layout change on their own.
     bool value_changed = false;
     const uint32_t ha_value_keys[NUM_HA_CHANNELS] = {
-        MESSAGE_KEY_HA1_VALUE, MESSAGE_KEY_HA2_VALUE, MESSAGE_KEY_HA3_VALUE,
+        MESSAGE_KEY_HA1_VALUE, MESSAGE_KEY_HA2_VALUE, MESSAGE_KEY_HA3_VALUE, MESSAGE_KEY_HA4_VALUE,
+        MESSAGE_KEY_HA5_VALUE, MESSAGE_KEY_HA6_VALUE, MESSAGE_KEY_HA7_VALUE, MESSAGE_KEY_HA8_VALUE,
+        MESSAGE_KEY_HA9_VALUE, MESSAGE_KEY_HA10_VALUE,
     };
     const uint32_t ha_label_keys[NUM_HA_CHANNELS] = {
-        MESSAGE_KEY_HA1_LABEL, MESSAGE_KEY_HA2_LABEL, MESSAGE_KEY_HA3_LABEL,
+        MESSAGE_KEY_HA1_LABEL, MESSAGE_KEY_HA2_LABEL, MESSAGE_KEY_HA3_LABEL, MESSAGE_KEY_HA4_LABEL,
+        MESSAGE_KEY_HA5_LABEL, MESSAGE_KEY_HA6_LABEL, MESSAGE_KEY_HA7_LABEL, MESSAGE_KEY_HA8_LABEL,
+        MESSAGE_KEY_HA9_LABEL, MESSAGE_KEY_HA10_LABEL,
     };
     // Optional dot-styling fields HA can send alongside value/label — see
     // HA_INTEGRATION_SPEC.md. Presence isn't what marks a channel as
     // dot-able (any channel can be put in the dot group); these just
     // control how it looks if it is.
     const uint32_t ha_on_color_keys[NUM_HA_CHANNELS] = {
-        MESSAGE_KEY_HA1_ON_COLOR, MESSAGE_KEY_HA2_ON_COLOR, MESSAGE_KEY_HA3_ON_COLOR,
+        MESSAGE_KEY_HA1_ON_COLOR, MESSAGE_KEY_HA2_ON_COLOR, MESSAGE_KEY_HA3_ON_COLOR, MESSAGE_KEY_HA4_ON_COLOR,
+        MESSAGE_KEY_HA5_ON_COLOR, MESSAGE_KEY_HA6_ON_COLOR, MESSAGE_KEY_HA7_ON_COLOR, MESSAGE_KEY_HA8_ON_COLOR,
+        MESSAGE_KEY_HA9_ON_COLOR, MESSAGE_KEY_HA10_ON_COLOR,
     };
     const uint32_t ha_off_color_keys[NUM_HA_CHANNELS] = {
-        MESSAGE_KEY_HA1_OFF_COLOR, MESSAGE_KEY_HA2_OFF_COLOR, MESSAGE_KEY_HA3_OFF_COLOR,
+        MESSAGE_KEY_HA1_OFF_COLOR, MESSAGE_KEY_HA2_OFF_COLOR, MESSAGE_KEY_HA3_OFF_COLOR, MESSAGE_KEY_HA4_OFF_COLOR,
+        MESSAGE_KEY_HA5_OFF_COLOR, MESSAGE_KEY_HA6_OFF_COLOR, MESSAGE_KEY_HA7_OFF_COLOR, MESSAGE_KEY_HA8_OFF_COLOR,
+        MESSAGE_KEY_HA9_OFF_COLOR, MESSAGE_KEY_HA10_OFF_COLOR,
     };
     const uint32_t ha_hide_when_keys[NUM_HA_CHANNELS] = {
-        MESSAGE_KEY_HA1_HIDE_WHEN, MESSAGE_KEY_HA2_HIDE_WHEN, MESSAGE_KEY_HA3_HIDE_WHEN,
+        MESSAGE_KEY_HA1_HIDE_WHEN, MESSAGE_KEY_HA2_HIDE_WHEN, MESSAGE_KEY_HA3_HIDE_WHEN, MESSAGE_KEY_HA4_HIDE_WHEN,
+        MESSAGE_KEY_HA5_HIDE_WHEN, MESSAGE_KEY_HA6_HIDE_WHEN, MESSAGE_KEY_HA7_HIDE_WHEN, MESSAGE_KEY_HA8_HIDE_WHEN,
+        MESSAGE_KEY_HA9_HIDE_WHEN, MESSAGE_KEY_HA10_HIDE_WHEN,
     };
-    const ChannelIndex ha_channels[NUM_HA_CHANNELS] = { CHANNEL_HA_1, CHANNEL_HA_2, CHANNEL_HA_3 };
+    const ChannelIndex ha_channels[NUM_HA_CHANNELS] = {
+        CHANNEL_HA_1, CHANNEL_HA_2, CHANNEL_HA_3, CHANNEL_HA_4, CHANNEL_HA_5,
+        CHANNEL_HA_6, CHANNEL_HA_7, CHANNEL_HA_8, CHANNEL_HA_9, CHANNEL_HA_10,
+    };
 
     for (int i = 0; i < NUM_HA_CHANNELS; i++) {
         ChannelData *ch = &s_channels[ha_channels[i]];

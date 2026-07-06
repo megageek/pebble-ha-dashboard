@@ -154,6 +154,17 @@ var haSubscriptionId = null;
 // True only between auth_ok and the connection being replaced/dropped —
 // gates outbound status reports so they're never sent to a half-open socket.
 var haAuthenticated = false;
+// Sticky per-channel "kind" cache (phone-side). The watch's ch->kind is
+// already sticky (see apply_ha_channel_updates() in main.c); HA is allowed
+// to send `kind` once and omit it on every later value-only update (see
+// HA_INTEGRATION_SPEC.md's `kind` field). Without this cache,
+// sendHaChannelToWatch() would have no memory of a channel's kind and
+// would re-encode `value` as a string on a value-only follow-up, which
+// makes the C side's unconditional `ch->kind = CHANNEL_KIND_TEXT` (on any
+// TUPLE_CSTRING HAn_VALUE) silently revert the channel to text rendering.
+// Indexed by channel number (1-10). Deliberately NOT reset on reconnect —
+// see connectToHomeAssistant() below.
+var haChannelKindCache = {};
 
 function getHaConfig() {
   var settings = {};
@@ -187,9 +198,10 @@ function scheduleHaReconnect() {
 // keeps growing as more optional styling/typing fields are added.
 //
 // item.kind: "text" (default)/"numeric"/"binary" — decides whether
-// item.value is sent as a string or a number; sticky on the watch side
-// (see parse_channel_kind() on the C side), so it only needs to be sent
-// once, not on every update, though sending it every time is harmless.
+// item.value is sent as a string or a number; sticky (see
+// haChannelKindCache above and parse_channel_kind() on the C side), so it
+// only needs to be sent once, not on every update, though sending it every
+// time is harmless.
 // item.min/item.max only take effect together (see main.c) — sent alone,
 // either is silently ignored.
 // item.hide_when must be "none"/"on"/"off" (see parse_hide_when()).
@@ -202,7 +214,13 @@ function sendHaChannelToWatch(item) {
   }
 
   var dict = {};
-  var isNumeric = item.kind === "numeric" || item.kind === "binary";
+  // See haChannelKindCache above: fall back to the last-known kind for
+  // this channel when this message omits it, rather than assuming "text".
+  if (item.kind !== undefined && item.kind !== null) {
+    haChannelKindCache[channelNum] = item.kind;
+  }
+  var effectiveKind = item.kind !== undefined && item.kind !== null ? item.kind : haChannelKindCache[channelNum];
+  var isNumeric = effectiveKind === "numeric" || effectiveKind === "binary";
   dict["HA" + channelNum + "_VALUE"] = isNumeric ? Number(item.value) : String(item.value).substring(0, 15);
   if (item.label !== undefined && item.label !== null) {
     dict["HA" + channelNum + "_LABEL"] = String(item.label).substring(0, 7);
@@ -292,6 +310,10 @@ function connectToHomeAssistant() {
   }
   haSubscriptionId = null;
   haAuthenticated = false;
+  // haChannelKindCache is deliberately NOT reset here — HA is expected to
+  // resend full current state (including kind) via the initial `result`
+  // after reconnect anyway, and keeping stale cached state around is
+  // harmless and strictly better than forgetting it.
 
   var wsUrl = config.url.replace(/\/+$/, "") + "/api/websocket";
   console.log("Connecting to Home Assistant: " + wsUrl);

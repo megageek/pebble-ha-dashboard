@@ -16,6 +16,18 @@ var BUNDLE_PATH = path.join(__dirname, "..", "build", "pebble-js-app.js");
 var HA_SUBSCRIBE_COMMAND = "pebble_dashboard/subscribe_channels"; // must match src/pkjs/index.js
 var HA1_VALUE_LIMIT = 15; // must match ChannelData.text[16] on the C side
 var LABEL_LIMIT = 7; // must match ChannelData.label[8] on the C side
+// kind/style/hide_when are parsed into C enums (parse_channel_kind()/
+// parse_channel_style()/parse_hide_when()), not copied into a fixed
+// buffer, so these two limits are JS-side-only lengths sized to fit the
+// longest legal value ("numeric"=7, "bar"/"raw"=3) rather than mirroring
+// a ChannelData struct field.
+var KIND_UNIT_LIMIT = 7; // must match sendHaChannelToWatch()'s kind/unit truncation
+var STYLE_LIMIT = 3; // must match sendHaChannelToWatch()'s style truncation
+var HIDE_WHEN_LIMIT = 4; // must match parse_hide_when()'s "none"/"on"/"off" vocabulary
+// on_color/off_color/bg_color/value_color/label_color DO mirror real
+// char[8] buffers on the C side (ChannelData.on_color etc.), same as
+// LABEL_LIMIT above.
+var STYLING_COLOR_LIMIT = 7;
 
 var failures = 0;
 
@@ -336,6 +348,59 @@ function freshEnv() {
   );
 })();
 
+// --- Test 6e: styling/kind/unit/style fields are each truncated to their
+// documented limits (see HA_INTEGRATION_SPEC.md's Truncation bullet),
+// mirroring testTruncation's value/label coverage above ---
+(function testStylingFieldsTruncation() {
+  var env = freshEnv();
+  env.authenticate();
+
+  var longColor = "extremelylongcolorname"; // > 7 chars
+  var longHideWhen = "always"; // > 4 chars
+  var longKind = "numericish"; // > 7 chars
+  var longUnit = "kilometers"; // > 7 chars
+  var longStyle = "barish"; // > 3 chars
+
+  env.sendChannelEvent({
+    channel: 5,
+    value: 10,
+    kind: longKind,
+    unit: longUnit,
+    style: longStyle,
+    on_color: longColor,
+    off_color: longColor,
+    hide_when: longHideWhen,
+    bg_color: longColor,
+    value_color: longColor,
+    label_color: longColor,
+  });
+
+  var msg = env.sentAppMessages[0];
+  assert(
+    msg.HA5_KIND === longKind.substring(0, KIND_UNIT_LIMIT) && msg.HA5_KIND.length === KIND_UNIT_LIMIT,
+    "kind truncated to " + KIND_UNIT_LIMIT + " chars, got " + JSON.stringify(msg.HA5_KIND)
+  );
+  assert(
+    msg.HA5_UNIT === longUnit.substring(0, KIND_UNIT_LIMIT) && msg.HA5_UNIT.length === KIND_UNIT_LIMIT,
+    "unit truncated to " + KIND_UNIT_LIMIT + " chars, got " + JSON.stringify(msg.HA5_UNIT)
+  );
+  assert(
+    msg.HA5_STYLE === longStyle.substring(0, STYLE_LIMIT) && msg.HA5_STYLE.length === STYLE_LIMIT,
+    "style truncated to " + STYLE_LIMIT + " chars, got " + JSON.stringify(msg.HA5_STYLE)
+  );
+  assert(
+    msg.HA5_HIDE_WHEN === longHideWhen.substring(0, HIDE_WHEN_LIMIT) && msg.HA5_HIDE_WHEN.length === HIDE_WHEN_LIMIT,
+    "hide_when truncated to " + HIDE_WHEN_LIMIT + " chars, got " + JSON.stringify(msg.HA5_HIDE_WHEN)
+  );
+  ["ON_COLOR", "OFF_COLOR", "BG_COLOR", "VALUE_COLOR", "LABEL_COLOR"].forEach(function (suffix) {
+    var key = "HA5_" + suffix;
+    assert(
+      msg[key] === longColor.substring(0, STYLING_COLOR_LIMIT) && msg[key].length === STYLING_COLOR_LIMIT,
+      key + " truncated to " + STYLING_COLOR_LIMIT + " chars, got " + JSON.stringify(msg[key])
+    );
+  });
+})();
+
 // --- Test 7: unknown channel numbers are ignored, not relayed ---
 (function testUnknownChannelIgnored() {
   var env = freshEnv();
@@ -395,6 +460,44 @@ function freshEnv() {
   assert(
     msg.HA2_VALUE === 1 && typeof msg.HA2_VALUE === "number" && msg.HA2_KIND === "binary",
     "binary value sent as a number with kind relayed, got " + JSON.stringify(msg)
+  );
+})();
+
+// --- Test 7d-2: kind is sticky across a later value-only update — a
+// channel that received kind:"numeric" once must still encode value as a
+// number on a later message that omits kind entirely (regression test for
+// the phone-side haChannelKindCache in sendHaChannelToWatch()) ---
+(function testStickyKindAcrossValueOnlyUpdate() {
+  var env = freshEnv();
+  env.authenticate();
+
+  env.sendChannelEvent({ channel: 1, value: 21, kind: "numeric" });
+  env.sendChannelEvent({ channel: 1, value: 22 }); // no kind this time
+
+  var msg = env.sentAppMessages[env.sentAppMessages.length - 1];
+  assert(
+    msg.HA1_VALUE === 22 && typeof msg.HA1_VALUE === "number",
+    "value-only update after a numeric kind still encodes as a number, got " +
+      JSON.stringify(msg.HA1_VALUE) + " (" + typeof msg.HA1_VALUE + ")"
+  );
+  assert(!("HA1_KIND" in msg), "kind key omitted on the value-only follow-up, got " + JSON.stringify(msg));
+})();
+
+// --- Test 7d-3: the sticky-kind cache is per-channel — a value-only
+// update on a channel that never received kind still encodes as a string,
+// even though a *different* channel's kind was cached as numeric ---
+(function testStickyKindCacheIsPerChannel() {
+  var env = freshEnv();
+  env.authenticate();
+
+  env.sendChannelEvent({ channel: 1, value: 21, kind: "numeric" });
+  env.sendChannelEvent({ channel: 2, value: 22 }); // different channel, never sent kind
+
+  var msg = env.sentAppMessages[env.sentAppMessages.length - 1];
+  assert(
+    msg.HA2_VALUE === "22" && typeof msg.HA2_VALUE === "string",
+    "a different channel's value-only update is unaffected by another channel's cached kind, got " +
+      JSON.stringify(msg.HA2_VALUE) + " (" + typeof msg.HA2_VALUE + ")"
   );
 })();
 
@@ -557,6 +660,45 @@ function freshEnv() {
   assert(
     reportMsg.status.disabled === "heart_rate,sleep" && reportMsg.status.battery_percent === 87,
     "string-valued disabled field relayed alongside numeric fields, got " + JSON.stringify(reportMsg.status)
+  );
+})();
+
+// --- Test 10c: every remaining report_status field (connected,
+// active_seconds, distance_meters, active_kcal, resting_kcal,
+// sleep_seconds, sleep_restful_seconds, model, firmware, color) relays
+// correctly — testStatusReportRelay/testDisabledGroupsRelay above only
+// exercise a subset ---
+(function testAllStatusReportFieldsRelay() {
+  var env = freshEnv();
+  env.authenticate();
+  var socket = env.getLastSocket();
+
+  env.sendAppMessageFromWatch({
+    REPORT_CONNECTED: 1,
+    REPORT_ACTIVE_SECONDS: 1800,
+    REPORT_DISTANCE_METERS: 3120,
+    REPORT_ACTIVE_KCAL: 210,
+    REPORT_RESTING_KCAL: 2918,
+    REPORT_SLEEP_SECONDS: 0,
+    REPORT_SLEEP_RESTFUL_SECONDS: 0,
+    REPORT_MODEL: "Pebble Time 2",
+    REPORT_FIRMWARE: "4.4.1",
+    REPORT_COLOR: "Black",
+  });
+
+  var reportMsg = socket.sent[socket.sent.length - 1];
+  assert(
+    reportMsg.status.connected === 1 &&
+      reportMsg.status.active_seconds === 1800 &&
+      reportMsg.status.distance_meters === 3120 &&
+      reportMsg.status.active_kcal === 210 &&
+      reportMsg.status.resting_kcal === 2918 &&
+      reportMsg.status.sleep_seconds === 0 &&
+      reportMsg.status.sleep_restful_seconds === 0 &&
+      reportMsg.status.model === "Pebble Time 2" &&
+      reportMsg.status.firmware === "4.4.1" &&
+      reportMsg.status.color === "Black",
+    "all remaining report_status fields relayed correctly, got " + JSON.stringify(reportMsg.status)
   );
 })();
 

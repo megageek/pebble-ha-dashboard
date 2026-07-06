@@ -109,7 +109,7 @@ Separately from dot styling, every channel — including each of the 10 HA chann
 
 ## Watch → HA: status reports (battery, health, device info)
 
-Separately from channel data (which flows HA → watch), the watch periodically reports its own status back to HA. The phone relays it over the same connection as a second custom command:
+Separately from channel data (which flows HA → watch), the watch reports its own status back to HA over the same connection, as two independent commands of the same type — never combined into one message, not even at startup: a periodic status report (battery/health/connected), and a one-time device-info report (model/firmware/color) sent once at app startup. Both are relayed by the phone as separate `pebble_dashboard/report_status` commands:
 
 ```json
 {"id": 2, "type": "pebble_dashboard/report_status", "status": {
@@ -124,10 +124,17 @@ Separately from channel data (which flows HA → watch), the watch periodically 
   "sleep_seconds": 0,
   "sleep_restful_seconds": 0,
   "heart_rate_bpm": 72,
+  "disabled": "heart_rate,sleep"
+}}
+```
+
+And separately, sent exactly once, at app startup only:
+
+```json
+{"id": 3, "type": "pebble_dashboard/report_status", "status": {
   "model": "Pebble Time 2",
   "firmware": "4.4.1",
-  "color": "Black",
-  "disabled": "heart_rate,sleep"
+  "color": "Black"
 }}
 ```
 
@@ -135,10 +142,11 @@ Register this as a second WebSocket API command, same as `subscribe_channels`. I
 
 Field notes:
 - **Every field is optional** — only present if that metric was actually accessible on the watch at report time (e.g. `heart_rate_bpm` is omitted entirely on a watch with no HR sensor, or if the user hasn't granted Health permission on their phone) *or* if the user disabled it in the watchface's config — see `disabled` below for how to tell those two cases apart. Don't assume any field is always there.
-- `battery_percent` (0–100), `battery_charging` (0/1), `connected` (0/1 — whether the watch app is connected to the phone; since this field only arrives at all when a message got through, expect it to normally read `1`) are sent on every battery-state change and on every minute tick.
-- `steps`, `active_seconds`, `distance_meters` (integer meters), `active_kcal`, `resting_kcal`, `sleep_seconds`, `sleep_restful_seconds` are **today's cumulative totals** (reset at local midnight on the watch), sent once per minute alongside the clock tick — not deltas, not per-event.
+- Every periodic report includes the fields for **every currently-enabled measure group** (see `disabled` below) — there is no per-trigger subset. A report triggered by a battery-state change and one triggered by a minute tick carry exactly the same shape, because the watch calls the identical reporting function either way. A periodic report is sent: once at app startup, on every battery-state change, once per minute on the clock tick, and immediately (not waiting for the next minute) whenever the user changes a reporting toggle.
+- `battery_percent` (0–100), `battery_charging` (0/1), `connected` (0/1 — whether the watch app is connected to the phone; since this field only arrives at all when a message got through, expect it to normally read `1`).
+- `steps`, `active_seconds`, `distance_meters` (integer meters), `active_kcal`, `resting_kcal`, `sleep_seconds`, `sleep_restful_seconds` are **today's cumulative totals** (reset at local midnight on the watch) — not deltas, not per-event.
 - `heart_rate_bpm` is the watch's most recent instantaneous heart-rate sample, taken from whatever the watch's **own default background HR sampling** already produced (`health_service_peek_current_value()`, no elevated sampling requested) — so it can be up to ~15 minutes stale per Pebble's own docs. This is deliberate: no extra battery cost is spent to keep it fresher.
-- `model`, `firmware`, `color` are static device info, sent **once at app startup only** — not repeated on every report. Don't expect these on every message.
+- `model`, `firmware`, `color` are static device info, sent **once at app startup only**, always as their own separate `pebble_dashboard/report_status` message — never combined with the periodic fields above, not even in the very first messages sent at startup (see the two example payloads above). Toggling `device_info` off/on later never resends this; only the `disabled` field's membership changes.
 - **`disabled`** — a comma-separated string naming every measure-group the user has explicitly turned off in the watchface's Clay config (values: `battery`, `steps`, `activity`, `sleep`, `heart_rate`, `connected`, `device_info`), e.g. `"heart_rate,sleep"`. **Absent entirely if nothing is disabled.** This is the signal to actually remove/deactivate an entity, as distinct from a field that's merely absent because it's not currently accessible on the hardware (which should probably just mark an existing entity unavailable, not delete it) — `disabled` is deliberately resent on *every* report (not just once at the moment of toggling) so a missed message never leaves the integration in a stale state; treat it as the authoritative current set, not an edge-triggered event.
 - **Only sent once the phone is authenticated to HA.** If the phone hasn't connected yet (HA_URL/HA_TOKEN not configured, or mid-reconnect), a report is simply dropped rather than queued — the next periodic report (next minute, or next battery change) will try again once connected. There's no retry/backfill for missed reports. A report is also sent **immediately** (not waiting for the next minute tick) whenever the user changes a reporting toggle, so a disablement reaches HA promptly.
 
@@ -148,7 +156,6 @@ Each measure group (`battery`, `steps`, `activity`, `sleep`, `heart_rate`, `conn
 
 ## What's *not* in this contract
 
-- **No numeric or binary channel kinds from HA yet.** Everything arrives and displays as text. If a future watchface version wants a real progress-bar-style HA channel (like battery today) or an ON/OFF-styled one (like a switch entity), that needs new message keys and C-side handling — this spec covers only what exists now.
 - **No entity-to-channel mapping convention is prescribed here.** How a specific HA entity gets assigned to a channel number (a config flow option, YAML, a dashboard helper, whatever) is entirely up to the integration's design — the watch and phone only know about channel numbers 1–10, never entity IDs.
 - **No explicit unsubscribe command from the phone.** The phone never sends one; it just closes/replaces the connection (e.g. on reconnect or when Home Assistant config is re-saved). The integration should treat connection close as the unsubscribe signal, per HA's standard subscription cleanup pattern, rather than expecting an explicit unsubscribe message.
 
@@ -157,9 +164,10 @@ Each measure group (`battery`, `steps`, `activity`, `sleep`, `heart_rate`, `conn
 | Direction | Message | Shape | Notes |
 |---|---|---|---|
 | Phone → HA | `pebble_dashboard/subscribe_channels` command | `{id, type}` | Sent once per successful auth (startup + every reconnect) |
-| HA → phone | `result` (reply to the command above) | `{id, type: "result", success, result: {channels: [{channel, value, label?, on_color?, off_color?, hide_when?}, ...]}}` | Current state, sent once, immediately |
-| HA → phone | `event` (tagged with the same `id`) | `{id, type: "event", event: {channel, value, label?, on_color?, off_color?, hide_when?}}` | Every subsequent change, ongoing |
-| Phone → HA | `pebble_dashboard/report_status` command | `{id, type, status: {battery_percent, battery_charging, connected, steps, active_seconds, distance_meters, active_kcal, resting_kcal, sleep_seconds, sleep_restful_seconds, heart_rate_bpm, model, firmware, color, disabled}}` (all fields optional) | Sent once/minute + on battery change + immediately on a reporting-toggle change; device info fields once at startup only; `disabled` is a comma-separated group-name string, resent every time, absent if nothing's disabled |
+| HA → phone | `result` (reply to the command above) | `{id, type: "result", success, result: {channels: [{channel, value, label?, kind?, unit?, min?, max?, style?, on_color?, off_color?, hide_when?, bg_color?, value_color?, label_color?}, ...]}}` | Current state, sent once, immediately |
+| HA → phone | `event` (tagged with the same `id`) | `{id, type: "event", event: {channel, value, label?, kind?, unit?, min?, max?, style?, on_color?, off_color?, hide_when?, bg_color?, value_color?, label_color?}}` | Every subsequent change, ongoing |
+| Phone → HA | `pebble_dashboard/report_status` command (periodic) | `{id, type, status: {battery_percent?, battery_charging?, connected?, steps?, active_seconds?, distance_meters?, active_kcal?, resting_kcal?, sleep_seconds?, sleep_restful_seconds?, heart_rate_bpm?, disabled?}}` | Sent at startup + once/minute + on every battery change + immediately on a reporting-toggle change; `disabled` is a comma-separated group-name string, resent every time, absent if nothing's disabled |
+| Phone → HA | `pebble_dashboard/report_status` command (device info) | `{id, type, status: {model, firmware, color}}` | Separate command with its own `id`; sent exactly once, at startup only; never combined with the periodic message above |
 | HA → phone | `result` (reply to the command above) | `{id, type: "result", success: true}` | Ack only; phone ignores the reply content |
 
 ## Testing this contract without a real integration

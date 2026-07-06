@@ -1,0 +1,58 @@
+name: Test
+
+"on":
+  push:
+  pull_request:
+
+# Pinned to the SDK version this repo is developed against (see
+# ~/.local/share/pebble-sdk/SDKs/ locally). Bump deliberately, not
+# automatically — a new SDK release changing waf/webpack behavior
+# shouldn't silently break CI.
+env:
+  PEBBLE_SDK_VERSION: "4.17"
+
+jobs:
+  pkjs-bridge-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      # The SDK download (toolchain + bundled webpack, ~800MB) is the slow
+      # part of this job; cache it keyed on the pinned version so only a
+      # version bump re-downloads it.
+      - name: Cache Pebble SDK
+        id: cache-pebble-sdk
+        uses: actions/cache@v4
+        with:
+          path: ~/.local/share/pebble-sdk
+          key: pebble-sdk-${{ env.PEBBLE_SDK_VERSION }}
+
+      - name: Install pebble-tool
+        run: pip install pebble-tool
+
+      - name: Install Pebble SDK
+        if: steps.cache-pebble-sdk.outputs.cache-hit != 'true'
+        run: pebble sdk install "$PEBBLE_SDK_VERSION"
+
+      # pebble-clay (see package.json) is required by src/pkjs/index.js;
+      # package-lock.json is committed for reproducible installs.
+      - name: Install npm dependencies
+        run: npm ci
+
+      # test/ha_bridge.test.js requires() the built build/pebble-js-app.js
+      # bundle, so it must run after a build, same as the documented local
+      # workflow (see CLAUDE.md). This also incidentally verifies the C
+      # side still compiles.
+      - name: Build watchface
+        run: pebble build
+
+      - name: Run pkjs bridge tests
+        run: node test/ha_bridge.test.js

@@ -606,6 +606,27 @@ static int8_t parse_hide_when(const char *s) {
     return 0;
 }
 
+// "text"/"numeric"/"binary" -> ChannelKind, for HA's optional HAn_KIND
+// field (see HA_INTEGRATION_SPEC.md). Unlike parse_hide_when()/
+// parse_channel_style() below, an unrecognized string is left unhandled
+// (returns false, *out untouched) rather than coerced to a default — a
+// integration typo should leave the channel's last-known kind alone
+// rather than silently flip it back to text.
+static bool parse_channel_kind(const char *s, ChannelKind *out) {
+    if (strcmp(s, "text") == 0) { *out = CHANNEL_KIND_TEXT; return true; }
+    if (strcmp(s, "numeric") == 0) { *out = CHANNEL_KIND_NUMERIC; return true; }
+    if (strcmp(s, "binary") == 0) { *out = CHANNEL_KIND_BINARY; return true; }
+    return false;
+}
+
+// "raw"/"bar" -> ChannelStyle, for HA's optional HAn_STYLE field. Same
+// unrecognized-is-ignored behavior as parse_channel_kind() above.
+static bool parse_channel_style(const char *s, ChannelStyle *out) {
+    if (strcmp(s, "raw") == 0) { *out = CHANNEL_STYLE_RAW; return true; }
+    if (strcmp(s, "bar") == 0) { *out = CHANNEL_STYLE_BAR; return true; }
+    return false;
+}
+
 // A channel's "on" state for dot purposes, regardless of its kind: binary
 // and numeric channels are on when non-zero; text channels (the only kind
 // HA channels can be) are on when the value is exactly the lowercase
@@ -1044,41 +1065,15 @@ static bool apply_dot_color_config(DictionaryIterator *iterator, ChannelIndex ch
     return changed;
 }
 
-static void inbox_received_callback(DictionaryIterator *iterator, void *context) {
-    bool layout_changed = false;
+// Applies HAn_VALUE/LABEL/KIND/UNIT/MIN/MAX/STYLE/ON_COLOR/OFF_COLOR/
+// HIDE_WHEN/BG_COLOR/VALUE_COLOR/LABEL_COLOR for all 10 HA channels, i.e.
+// everything HA can push for its own remote channels. Pulled out of
+// inbox_received_callback() into its own function purely to keep that
+// function's top-level flow readable as a short sequence of named steps —
+// this one block alone was pushing 200+ lines and 14 key arrays inline.
+static bool apply_ha_channel_updates(DictionaryIterator *iterator) {
+    bool changed = false;
 
-    Tuple *template_tuple = dict_find(iterator, MESSAGE_KEY_TEMPLATE_INDEX);
-    if (template_tuple) {
-        int value = (int)template_tuple->value->int32;
-        if (value >= 0 && value < NUM_TEMPLATES) {
-            s_active_template = value;
-            persist_write_int(PERSIST_KEY_TEMPLATE, value);
-            layout_changed = true;
-        }
-    }
-
-    const uint32_t slot_keys[NUM_CONFIGURABLE_SLOTS] = {
-        MESSAGE_KEY_SLOT_0_CHANNEL, MESSAGE_KEY_SLOT_1_CHANNEL, MESSAGE_KEY_SLOT_2_CHANNEL,
-        MESSAGE_KEY_SLOT_3_CHANNEL, MESSAGE_KEY_SLOT_4_CHANNEL, MESSAGE_KEY_SLOT_5_CHANNEL,
-        MESSAGE_KEY_SLOT_6_CHANNEL, MESSAGE_KEY_SLOT_7_CHANNEL, MESSAGE_KEY_SLOT_8_CHANNEL,
-        MESSAGE_KEY_SLOT_9_CHANNEL,
-    };
-    for (int i = 0; i < NUM_CONFIGURABLE_SLOTS; i++) {
-        Tuple *tuple = dict_find(iterator, slot_keys[i]);
-        if (!tuple) {
-            continue;
-        }
-        int value = (int)tuple->value->int32;
-        if (value >= 0 && value < NUM_CHANNELS) {
-            s_slot_channel_override[i] = value;
-            persist_write_int(PERSIST_KEY_SLOT_BASE + i, value);
-            layout_changed = true;
-        }
-    }
-
-    // Remote channel updates pushed by pkjs from Home Assistant. Only
-    // redraws the affected slots — never a layout change on their own.
-    bool value_changed = false;
     const uint32_t ha_value_keys[NUM_HA_CHANNELS] = {
         MESSAGE_KEY_HA1_VALUE, MESSAGE_KEY_HA2_VALUE, MESSAGE_KEY_HA3_VALUE, MESSAGE_KEY_HA4_VALUE,
         MESSAGE_KEY_HA5_VALUE, MESSAGE_KEY_HA6_VALUE, MESSAGE_KEY_HA7_VALUE, MESSAGE_KEY_HA8_VALUE,
@@ -1127,6 +1122,40 @@ static void inbox_received_callback(DictionaryIterator *iterator, void *context)
         MESSAGE_KEY_HA5_LABEL_COLOR, MESSAGE_KEY_HA6_LABEL_COLOR, MESSAGE_KEY_HA7_LABEL_COLOR, MESSAGE_KEY_HA8_LABEL_COLOR,
         MESSAGE_KEY_HA9_LABEL_COLOR, MESSAGE_KEY_HA10_LABEL_COLOR,
     };
+    // Optional numeric/binary support (see HA_INTEGRATION_SPEC.md). Kind is
+    // sticky (only updated when sent) and defaults to CHANNEL_KIND_TEXT from
+    // init_channels() until an integration ever sends one — existing
+    // text-only integrations keep working unmodified. min/max only take
+    // effect when both are present in the *same* message (see below), so
+    // there's no separate "min set but max isn't yet" persisted state to
+    // track. style defaults to CHANNEL_STYLE_RAW and only matters once
+    // kind=numeric and a range exists (draw_channel_small_row() already
+    // requires all three for bar rendering, same as local channels).
+    const uint32_t ha_kind_keys[NUM_HA_CHANNELS] = {
+        MESSAGE_KEY_HA1_KIND, MESSAGE_KEY_HA2_KIND, MESSAGE_KEY_HA3_KIND, MESSAGE_KEY_HA4_KIND,
+        MESSAGE_KEY_HA5_KIND, MESSAGE_KEY_HA6_KIND, MESSAGE_KEY_HA7_KIND, MESSAGE_KEY_HA8_KIND,
+        MESSAGE_KEY_HA9_KIND, MESSAGE_KEY_HA10_KIND,
+    };
+    const uint32_t ha_unit_keys[NUM_HA_CHANNELS] = {
+        MESSAGE_KEY_HA1_UNIT, MESSAGE_KEY_HA2_UNIT, MESSAGE_KEY_HA3_UNIT, MESSAGE_KEY_HA4_UNIT,
+        MESSAGE_KEY_HA5_UNIT, MESSAGE_KEY_HA6_UNIT, MESSAGE_KEY_HA7_UNIT, MESSAGE_KEY_HA8_UNIT,
+        MESSAGE_KEY_HA9_UNIT, MESSAGE_KEY_HA10_UNIT,
+    };
+    const uint32_t ha_min_keys[NUM_HA_CHANNELS] = {
+        MESSAGE_KEY_HA1_MIN, MESSAGE_KEY_HA2_MIN, MESSAGE_KEY_HA3_MIN, MESSAGE_KEY_HA4_MIN,
+        MESSAGE_KEY_HA5_MIN, MESSAGE_KEY_HA6_MIN, MESSAGE_KEY_HA7_MIN, MESSAGE_KEY_HA8_MIN,
+        MESSAGE_KEY_HA9_MIN, MESSAGE_KEY_HA10_MIN,
+    };
+    const uint32_t ha_max_keys[NUM_HA_CHANNELS] = {
+        MESSAGE_KEY_HA1_MAX, MESSAGE_KEY_HA2_MAX, MESSAGE_KEY_HA3_MAX, MESSAGE_KEY_HA4_MAX,
+        MESSAGE_KEY_HA5_MAX, MESSAGE_KEY_HA6_MAX, MESSAGE_KEY_HA7_MAX, MESSAGE_KEY_HA8_MAX,
+        MESSAGE_KEY_HA9_MAX, MESSAGE_KEY_HA10_MAX,
+    };
+    const uint32_t ha_style_keys[NUM_HA_CHANNELS] = {
+        MESSAGE_KEY_HA1_STYLE, MESSAGE_KEY_HA2_STYLE, MESSAGE_KEY_HA3_STYLE, MESSAGE_KEY_HA4_STYLE,
+        MESSAGE_KEY_HA5_STYLE, MESSAGE_KEY_HA6_STYLE, MESSAGE_KEY_HA7_STYLE, MESSAGE_KEY_HA8_STYLE,
+        MESSAGE_KEY_HA9_STYLE, MESSAGE_KEY_HA10_STYLE,
+    };
     const ChannelIndex ha_channels[NUM_HA_CHANNELS] = {
         CHANNEL_HA_1, CHANNEL_HA_2, CHANNEL_HA_3, CHANNEL_HA_4, CHANNEL_HA_5,
         CHANNEL_HA_6, CHANNEL_HA_7, CHANNEL_HA_8, CHANNEL_HA_9, CHANNEL_HA_10,
@@ -1135,62 +1164,216 @@ static void inbox_received_callback(DictionaryIterator *iterator, void *context)
     for (int i = 0; i < NUM_HA_CHANNELS; i++) {
         ChannelData *ch = &s_channels[ha_channels[i]];
 
+        // HAn_KIND processed before HAn_VALUE so a same-message kind change
+        // is already in effect by the time the value below is stored —
+        // though since both numeric and binary just store into ch->value,
+        // this ordering is a readability choice, not a correctness one.
+        Tuple *kind_tuple = dict_find(iterator, ha_kind_keys[i]);
+        if (kind_tuple && kind_tuple->type == TUPLE_CSTRING) {
+            ChannelKind parsed_kind;
+            if (parse_channel_kind(kind_tuple->value->cstring, &parsed_kind)) {
+                ch->kind = parsed_kind;
+                changed = true;
+            }
+        }
+
         Tuple *value_tuple = dict_find(iterator, ha_value_keys[i]);
         if (value_tuple && value_tuple->type == TUPLE_CSTRING) {
             strncpy(ch->text, value_tuple->value->cstring, sizeof(ch->text) - 1);
             ch->text[sizeof(ch->text) - 1] = '\0';
             ch->kind = CHANNEL_KIND_TEXT;
-            value_changed = true;
+            changed = true;
+        } else if (value_tuple) {
+            // Not a string, so a numeric (TUPLE_INT/TUPLE_UINT) wire value —
+            // valid for both CHANNEL_KIND_NUMERIC and CHANNEL_KIND_BINARY,
+            // which share the same int32 ch->value field. If HAn_KIND was
+            // never sent (ch->kind still the CHANNEL_KIND_TEXT default from
+            // init_channels()), assume NUMERIC rather than leaving the
+            // channel showing nothing for a forgetful integration.
+            ch->value = value_tuple->value->int32;
+            if (ch->kind == CHANNEL_KIND_TEXT) {
+                ch->kind = CHANNEL_KIND_NUMERIC;
+            }
+            changed = true;
+        }
+
+        Tuple *unit_tuple = dict_find(iterator, ha_unit_keys[i]);
+        if (unit_tuple && unit_tuple->type == TUPLE_CSTRING) {
+            strncpy(ch->unit, unit_tuple->value->cstring, sizeof(ch->unit) - 1);
+            ch->unit[sizeof(ch->unit) - 1] = '\0';
+            changed = true;
+        }
+
+        // min/max only take effect together, in the same message — a range
+        // is metadata sent once at channel setup, not something that
+        // changes one bound at a time, so there's no need to track a
+        // separate "min received but not max yet" state across messages.
+        Tuple *min_tuple = dict_find(iterator, ha_min_keys[i]);
+        Tuple *max_tuple = dict_find(iterator, ha_max_keys[i]);
+        if (min_tuple && max_tuple) {
+            ch->min = min_tuple->value->int32;
+            ch->max = max_tuple->value->int32;
+            ch->has_range = true;
+            changed = true;
+        }
+
+        Tuple *style_tuple = dict_find(iterator, ha_style_keys[i]);
+        if (style_tuple && style_tuple->type == TUPLE_CSTRING) {
+            ChannelStyle parsed_style;
+            if (parse_channel_style(style_tuple->value->cstring, &parsed_style)) {
+                ch->style = parsed_style;
+                changed = true;
+            }
         }
 
         Tuple *label_tuple = dict_find(iterator, ha_label_keys[i]);
         if (label_tuple && label_tuple->type == TUPLE_CSTRING) {
             strncpy(ch->label, label_tuple->value->cstring, sizeof(ch->label) - 1);
             ch->label[sizeof(ch->label) - 1] = '\0';
-            value_changed = true;
+            changed = true;
         }
 
         Tuple *on_color_tuple = dict_find(iterator, ha_on_color_keys[i]);
         if (on_color_tuple && on_color_tuple->type == TUPLE_CSTRING) {
             strncpy(ch->on_color, on_color_tuple->value->cstring, sizeof(ch->on_color) - 1);
             ch->on_color[sizeof(ch->on_color) - 1] = '\0';
-            value_changed = true;
+            changed = true;
         }
 
         Tuple *off_color_tuple = dict_find(iterator, ha_off_color_keys[i]);
         if (off_color_tuple && off_color_tuple->type == TUPLE_CSTRING) {
             strncpy(ch->off_color, off_color_tuple->value->cstring, sizeof(ch->off_color) - 1);
             ch->off_color[sizeof(ch->off_color) - 1] = '\0';
-            value_changed = true;
+            changed = true;
         }
 
         Tuple *hide_when_tuple = dict_find(iterator, ha_hide_when_keys[i]);
         if (hide_when_tuple && hide_when_tuple->type == TUPLE_CSTRING) {
             ch->hide_when = parse_hide_when(hide_when_tuple->value->cstring);
-            value_changed = true;
+            changed = true;
         }
 
         Tuple *bg_color_tuple = dict_find(iterator, ha_bg_color_keys[i]);
         if (bg_color_tuple && bg_color_tuple->type == TUPLE_CSTRING) {
             strncpy(ch->bg_color, bg_color_tuple->value->cstring, sizeof(ch->bg_color) - 1);
             ch->bg_color[sizeof(ch->bg_color) - 1] = '\0';
-            value_changed = true;
+            changed = true;
         }
 
         Tuple *value_color_tuple = dict_find(iterator, ha_value_color_keys[i]);
         if (value_color_tuple && value_color_tuple->type == TUPLE_CSTRING) {
             strncpy(ch->value_color, value_color_tuple->value->cstring, sizeof(ch->value_color) - 1);
             ch->value_color[sizeof(ch->value_color) - 1] = '\0';
-            value_changed = true;
+            changed = true;
         }
 
         Tuple *label_color_tuple = dict_find(iterator, ha_label_color_keys[i]);
         if (label_color_tuple && label_color_tuple->type == TUPLE_CSTRING) {
             strncpy(ch->label_color, label_color_tuple->value->cstring, sizeof(ch->label_color) - 1);
             ch->label_color[sizeof(ch->label_color) - 1] = '\0';
-            value_changed = true;
+            changed = true;
         }
     }
+
+    return changed;
+}
+
+// Applies TIME_BG_COLOR..HEART_RATE_LABEL_COLOR (39 keys, 3 per local
+// channel) for the 13 local channels. Split out of inbox_received_callback()
+// for the same readability reason as apply_ha_channel_updates() above.
+static bool apply_local_channel_colors(DictionaryIterator *iterator) {
+    bool changed = false;
+
+    const uint32_t local_bg_color_keys[NUM_LOCAL_COLOR_CHANNELS] = {
+        MESSAGE_KEY_TIME_BG_COLOR, MESSAGE_KEY_DATE_BG_COLOR, MESSAGE_KEY_BATTERY_BG_COLOR, MESSAGE_KEY_STEPS_BG_COLOR,
+        MESSAGE_KEY_CHARGE_BG_COLOR, MESSAGE_KEY_CONN_BG_COLOR, MESSAGE_KEY_ACTIVE_MINUTES_BG_COLOR, MESSAGE_KEY_DISTANCE_BG_COLOR,
+        MESSAGE_KEY_ACTIVE_KCAL_BG_COLOR, MESSAGE_KEY_RESTING_KCAL_BG_COLOR, MESSAGE_KEY_SLEEP_MINUTES_BG_COLOR,
+        MESSAGE_KEY_SLEEP_RESTFUL_MINUTES_BG_COLOR, MESSAGE_KEY_HEART_RATE_BG_COLOR,
+    };
+    const uint32_t local_value_color_keys[NUM_LOCAL_COLOR_CHANNELS] = {
+        MESSAGE_KEY_TIME_VALUE_COLOR, MESSAGE_KEY_DATE_VALUE_COLOR, MESSAGE_KEY_BATTERY_VALUE_COLOR, MESSAGE_KEY_STEPS_VALUE_COLOR,
+        MESSAGE_KEY_CHARGE_VALUE_COLOR, MESSAGE_KEY_CONN_VALUE_COLOR, MESSAGE_KEY_ACTIVE_MINUTES_VALUE_COLOR, MESSAGE_KEY_DISTANCE_VALUE_COLOR,
+        MESSAGE_KEY_ACTIVE_KCAL_VALUE_COLOR, MESSAGE_KEY_RESTING_KCAL_VALUE_COLOR, MESSAGE_KEY_SLEEP_MINUTES_VALUE_COLOR,
+        MESSAGE_KEY_SLEEP_RESTFUL_MINUTES_VALUE_COLOR, MESSAGE_KEY_HEART_RATE_VALUE_COLOR,
+    };
+    const uint32_t local_label_color_keys[NUM_LOCAL_COLOR_CHANNELS] = {
+        MESSAGE_KEY_TIME_LABEL_COLOR, MESSAGE_KEY_DATE_LABEL_COLOR, MESSAGE_KEY_BATTERY_LABEL_COLOR, MESSAGE_KEY_STEPS_LABEL_COLOR,
+        MESSAGE_KEY_CHARGE_LABEL_COLOR, MESSAGE_KEY_CONN_LABEL_COLOR, MESSAGE_KEY_ACTIVE_MINUTES_LABEL_COLOR, MESSAGE_KEY_DISTANCE_LABEL_COLOR,
+        MESSAGE_KEY_ACTIVE_KCAL_LABEL_COLOR, MESSAGE_KEY_RESTING_KCAL_LABEL_COLOR, MESSAGE_KEY_SLEEP_MINUTES_LABEL_COLOR,
+        MESSAGE_KEY_SLEEP_RESTFUL_MINUTES_LABEL_COLOR, MESSAGE_KEY_HEART_RATE_LABEL_COLOR,
+    };
+
+    for (int i = 0; i < NUM_LOCAL_COLOR_CHANNELS; i++) {
+        ChannelData *ch = &s_channels[local_color_channels[i]];
+        int bg_key = PERSIST_KEY_LOCAL_COLOR_BASE + i * 3 + 0;
+        int value_key = PERSIST_KEY_LOCAL_COLOR_BASE + i * 3 + 1;
+        int label_key = PERSIST_KEY_LOCAL_COLOR_BASE + i * 3 + 2;
+
+        Tuple *bg_tuple = dict_find(iterator, local_bg_color_keys[i]);
+        if (bg_tuple && bg_tuple->type == TUPLE_CSTRING) {
+            strncpy(ch->bg_color, bg_tuple->value->cstring, sizeof(ch->bg_color) - 1);
+            ch->bg_color[sizeof(ch->bg_color) - 1] = '\0';
+            persist_write_string(bg_key, ch->bg_color);
+            changed = true;
+        }
+
+        Tuple *value_tuple = dict_find(iterator, local_value_color_keys[i]);
+        if (value_tuple && value_tuple->type == TUPLE_CSTRING) {
+            strncpy(ch->value_color, value_tuple->value->cstring, sizeof(ch->value_color) - 1);
+            ch->value_color[sizeof(ch->value_color) - 1] = '\0';
+            persist_write_string(value_key, ch->value_color);
+            changed = true;
+        }
+
+        Tuple *label_tuple = dict_find(iterator, local_label_color_keys[i]);
+        if (label_tuple && label_tuple->type == TUPLE_CSTRING) {
+            strncpy(ch->label_color, label_tuple->value->cstring, sizeof(ch->label_color) - 1);
+            ch->label_color[sizeof(ch->label_color) - 1] = '\0';
+            persist_write_string(label_key, ch->label_color);
+            changed = true;
+        }
+    }
+
+    return changed;
+}
+
+static void inbox_received_callback(DictionaryIterator *iterator, void *context) {
+    bool layout_changed = false;
+
+    Tuple *template_tuple = dict_find(iterator, MESSAGE_KEY_TEMPLATE_INDEX);
+    if (template_tuple) {
+        int value = (int)template_tuple->value->int32;
+        if (value >= 0 && value < NUM_TEMPLATES) {
+            s_active_template = value;
+            persist_write_int(PERSIST_KEY_TEMPLATE, value);
+            layout_changed = true;
+        }
+    }
+
+    const uint32_t slot_keys[NUM_CONFIGURABLE_SLOTS] = {
+        MESSAGE_KEY_SLOT_0_CHANNEL, MESSAGE_KEY_SLOT_1_CHANNEL, MESSAGE_KEY_SLOT_2_CHANNEL,
+        MESSAGE_KEY_SLOT_3_CHANNEL, MESSAGE_KEY_SLOT_4_CHANNEL, MESSAGE_KEY_SLOT_5_CHANNEL,
+        MESSAGE_KEY_SLOT_6_CHANNEL, MESSAGE_KEY_SLOT_7_CHANNEL, MESSAGE_KEY_SLOT_8_CHANNEL,
+        MESSAGE_KEY_SLOT_9_CHANNEL,
+    };
+    for (int i = 0; i < NUM_CONFIGURABLE_SLOTS; i++) {
+        Tuple *tuple = dict_find(iterator, slot_keys[i]);
+        if (!tuple) {
+            continue;
+        }
+        int value = (int)tuple->value->int32;
+        if (value >= 0 && value < NUM_CHANNELS) {
+            s_slot_channel_override[i] = value;
+            persist_write_int(PERSIST_KEY_SLOT_BASE + i, value);
+            layout_changed = true;
+        }
+    }
+
+    // Remote channel updates pushed by pkjs from Home Assistant. Only
+    // redraws the affected slots — never a layout change on their own. See
+    // apply_ha_channel_updates() above for why this is its own function
+    // rather than inline here.
+    bool value_changed = apply_ha_channel_updates(iterator);
 
     // Per-measure reporting toggles from Clay config. Changing one doesn't
     // affect what's shown on the watch face at all — only what gets reported
@@ -1272,59 +1455,11 @@ static void inbox_received_callback(DictionaryIterator *iterator, void *context)
     }
 
     // General-purpose background/value/label colors for the 13 local
-    // channels (see local_color_channels[] above) — Clay-only; HA channels
-    // get the equivalent fields directly in the HA-channel loop above.
-    // Doesn't affect slot rects/count, so redraw-only like the dot config.
-    bool color_config_changed = false;
-    const uint32_t local_bg_color_keys[NUM_LOCAL_COLOR_CHANNELS] = {
-        MESSAGE_KEY_TIME_BG_COLOR, MESSAGE_KEY_DATE_BG_COLOR, MESSAGE_KEY_BATTERY_BG_COLOR, MESSAGE_KEY_STEPS_BG_COLOR,
-        MESSAGE_KEY_CHARGE_BG_COLOR, MESSAGE_KEY_CONN_BG_COLOR, MESSAGE_KEY_ACTIVE_MINUTES_BG_COLOR, MESSAGE_KEY_DISTANCE_BG_COLOR,
-        MESSAGE_KEY_ACTIVE_KCAL_BG_COLOR, MESSAGE_KEY_RESTING_KCAL_BG_COLOR, MESSAGE_KEY_SLEEP_MINUTES_BG_COLOR,
-        MESSAGE_KEY_SLEEP_RESTFUL_MINUTES_BG_COLOR, MESSAGE_KEY_HEART_RATE_BG_COLOR,
-    };
-    const uint32_t local_value_color_keys[NUM_LOCAL_COLOR_CHANNELS] = {
-        MESSAGE_KEY_TIME_VALUE_COLOR, MESSAGE_KEY_DATE_VALUE_COLOR, MESSAGE_KEY_BATTERY_VALUE_COLOR, MESSAGE_KEY_STEPS_VALUE_COLOR,
-        MESSAGE_KEY_CHARGE_VALUE_COLOR, MESSAGE_KEY_CONN_VALUE_COLOR, MESSAGE_KEY_ACTIVE_MINUTES_VALUE_COLOR, MESSAGE_KEY_DISTANCE_VALUE_COLOR,
-        MESSAGE_KEY_ACTIVE_KCAL_VALUE_COLOR, MESSAGE_KEY_RESTING_KCAL_VALUE_COLOR, MESSAGE_KEY_SLEEP_MINUTES_VALUE_COLOR,
-        MESSAGE_KEY_SLEEP_RESTFUL_MINUTES_VALUE_COLOR, MESSAGE_KEY_HEART_RATE_VALUE_COLOR,
-    };
-    const uint32_t local_label_color_keys[NUM_LOCAL_COLOR_CHANNELS] = {
-        MESSAGE_KEY_TIME_LABEL_COLOR, MESSAGE_KEY_DATE_LABEL_COLOR, MESSAGE_KEY_BATTERY_LABEL_COLOR, MESSAGE_KEY_STEPS_LABEL_COLOR,
-        MESSAGE_KEY_CHARGE_LABEL_COLOR, MESSAGE_KEY_CONN_LABEL_COLOR, MESSAGE_KEY_ACTIVE_MINUTES_LABEL_COLOR, MESSAGE_KEY_DISTANCE_LABEL_COLOR,
-        MESSAGE_KEY_ACTIVE_KCAL_LABEL_COLOR, MESSAGE_KEY_RESTING_KCAL_LABEL_COLOR, MESSAGE_KEY_SLEEP_MINUTES_LABEL_COLOR,
-        MESSAGE_KEY_SLEEP_RESTFUL_MINUTES_LABEL_COLOR, MESSAGE_KEY_HEART_RATE_LABEL_COLOR,
-    };
-
-    for (int i = 0; i < NUM_LOCAL_COLOR_CHANNELS; i++) {
-        ChannelData *ch = &s_channels[local_color_channels[i]];
-        int bg_key = PERSIST_KEY_LOCAL_COLOR_BASE + i * 3 + 0;
-        int value_key = PERSIST_KEY_LOCAL_COLOR_BASE + i * 3 + 1;
-        int label_key = PERSIST_KEY_LOCAL_COLOR_BASE + i * 3 + 2;
-
-        Tuple *bg_tuple = dict_find(iterator, local_bg_color_keys[i]);
-        if (bg_tuple && bg_tuple->type == TUPLE_CSTRING) {
-            strncpy(ch->bg_color, bg_tuple->value->cstring, sizeof(ch->bg_color) - 1);
-            ch->bg_color[sizeof(ch->bg_color) - 1] = '\0';
-            persist_write_string(bg_key, ch->bg_color);
-            color_config_changed = true;
-        }
-
-        Tuple *value_tuple = dict_find(iterator, local_value_color_keys[i]);
-        if (value_tuple && value_tuple->type == TUPLE_CSTRING) {
-            strncpy(ch->value_color, value_tuple->value->cstring, sizeof(ch->value_color) - 1);
-            ch->value_color[sizeof(ch->value_color) - 1] = '\0';
-            persist_write_string(value_key, ch->value_color);
-            color_config_changed = true;
-        }
-
-        Tuple *label_tuple = dict_find(iterator, local_label_color_keys[i]);
-        if (label_tuple && label_tuple->type == TUPLE_CSTRING) {
-            strncpy(ch->label_color, label_tuple->value->cstring, sizeof(ch->label_color) - 1);
-            ch->label_color[sizeof(ch->label_color) - 1] = '\0';
-            persist_write_string(label_key, ch->label_color);
-            color_config_changed = true;
-        }
-    }
+    // channels — Clay-only; HA channels get the equivalent fields directly
+    // in apply_ha_channel_updates() above. Doesn't affect slot rects/count,
+    // so redraw-only like the dot config. See apply_local_channel_colors()
+    // above for why this is its own function rather than inline here.
+    bool color_config_changed = apply_local_channel_colors(iterator);
 
     if (!layout_changed && !value_changed && !reporting_config_changed && !dot_config_changed
         && !color_config_changed) {

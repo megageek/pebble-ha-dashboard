@@ -180,40 +180,63 @@ function scheduleHaReconnect() {
   haReconnectDelay = Math.min(haReconnectDelay * 2, RECONNECT_MAX_DELAY_MS);
 }
 
-// onColor/offColor/hideWhen/bgColor/valueColor/labelColor are all optional —
-// see HA_INTEGRATION_SPEC.md. Their presence isn't what marks a channel as
-// dot-capable or styleable (any channel can be assigned into the dot group,
-// and always renders in whatever slot holds it); they just style it if set.
-// hideWhen must be "none"/"on"/"off" (see parse_hide_when() on the C side).
-function sendHaChannelToWatch(channel, value, label, onColor, offColor, hideWhen, bgColor, valueColor, labelColor) {
-  var channelNum = Number(channel);
+// Every field except channel/value is optional — see HA_INTEGRATION_SPEC.md.
+// Takes the raw HA payload object (same shape whether it came from the
+// initial subscribe result or a later event) rather than a long positional
+// argument list, since that shape already exists at both call sites and
+// keeps growing as more optional styling/typing fields are added.
+//
+// item.kind: "text" (default)/"numeric"/"binary" — decides whether
+// item.value is sent as a string or a number; sticky on the watch side
+// (see parse_channel_kind() on the C side), so it only needs to be sent
+// once, not on every update, though sending it every time is harmless.
+// item.min/item.max only take effect together (see main.c) — sent alone,
+// either is silently ignored.
+// item.hide_when must be "none"/"on"/"off" (see parse_hide_when()).
+// item.style must be "raw"/"bar" (see parse_channel_style()).
+function sendHaChannelToWatch(item) {
+  var channelNum = Number(item.channel);
   if (!(channelNum >= 1 && channelNum <= NUM_HA_CHANNELS)) {
-    console.log("Ignoring HA update for unknown channel: " + channel);
+    console.log("Ignoring HA update for unknown channel: " + item.channel);
     return;
   }
 
   var dict = {};
-  dict["HA" + channelNum + "_VALUE"] = String(value).substring(0, 15);
-  if (label !== undefined && label !== null) {
-    dict["HA" + channelNum + "_LABEL"] = String(label).substring(0, 7);
+  var isNumeric = item.kind === "numeric" || item.kind === "binary";
+  dict["HA" + channelNum + "_VALUE"] = isNumeric ? Number(item.value) : String(item.value).substring(0, 15);
+  if (item.label !== undefined && item.label !== null) {
+    dict["HA" + channelNum + "_LABEL"] = String(item.label).substring(0, 7);
   }
-  if (onColor !== undefined && onColor !== null) {
-    dict["HA" + channelNum + "_ON_COLOR"] = String(onColor).substring(0, 7);
+  if (item.kind !== undefined && item.kind !== null) {
+    dict["HA" + channelNum + "_KIND"] = String(item.kind).substring(0, 7);
   }
-  if (offColor !== undefined && offColor !== null) {
-    dict["HA" + channelNum + "_OFF_COLOR"] = String(offColor).substring(0, 7);
+  if (item.unit !== undefined && item.unit !== null) {
+    dict["HA" + channelNum + "_UNIT"] = String(item.unit).substring(0, 7);
   }
-  if (hideWhen !== undefined && hideWhen !== null) {
-    dict["HA" + channelNum + "_HIDE_WHEN"] = String(hideWhen).substring(0, 4);
+  if (item.min !== undefined && item.min !== null && item.max !== undefined && item.max !== null) {
+    dict["HA" + channelNum + "_MIN"] = Number(item.min);
+    dict["HA" + channelNum + "_MAX"] = Number(item.max);
   }
-  if (bgColor !== undefined && bgColor !== null) {
-    dict["HA" + channelNum + "_BG_COLOR"] = String(bgColor).substring(0, 7);
+  if (item.style !== undefined && item.style !== null) {
+    dict["HA" + channelNum + "_STYLE"] = String(item.style).substring(0, 3);
   }
-  if (valueColor !== undefined && valueColor !== null) {
-    dict["HA" + channelNum + "_VALUE_COLOR"] = String(valueColor).substring(0, 7);
+  if (item.on_color !== undefined && item.on_color !== null) {
+    dict["HA" + channelNum + "_ON_COLOR"] = String(item.on_color).substring(0, 7);
   }
-  if (labelColor !== undefined && labelColor !== null) {
-    dict["HA" + channelNum + "_LABEL_COLOR"] = String(labelColor).substring(0, 7);
+  if (item.off_color !== undefined && item.off_color !== null) {
+    dict["HA" + channelNum + "_OFF_COLOR"] = String(item.off_color).substring(0, 7);
+  }
+  if (item.hide_when !== undefined && item.hide_when !== null) {
+    dict["HA" + channelNum + "_HIDE_WHEN"] = String(item.hide_when).substring(0, 4);
+  }
+  if (item.bg_color !== undefined && item.bg_color !== null) {
+    dict["HA" + channelNum + "_BG_COLOR"] = String(item.bg_color).substring(0, 7);
+  }
+  if (item.value_color !== undefined && item.value_color !== null) {
+    dict["HA" + channelNum + "_VALUE_COLOR"] = String(item.value_color).substring(0, 7);
+  }
+  if (item.label_color !== undefined && item.label_color !== null) {
+    dict["HA" + channelNum + "_LABEL_COLOR"] = String(item.label_color).substring(0, 7);
   }
 
   Pebble.sendAppMessage(
@@ -307,19 +330,10 @@ function connectToHomeAssistant() {
       }
       var channels = (message.result && message.result.channels) || [];
       channels.forEach(function (item) {
-        sendHaChannelToWatch(
-          item.channel, item.value, item.label,
-          item.on_color, item.off_color, item.hide_when,
-          item.bg_color, item.value_color, item.label_color
-        );
+        sendHaChannelToWatch(item);
       });
     } else if (message.id === haSubscriptionId && message.type === "event") {
-      var item = message.event || {};
-      sendHaChannelToWatch(
-        item.channel, item.value, item.label,
-        item.on_color, item.off_color, item.hide_when,
-        item.bg_color, item.value_color, item.label_color
-      );
+      sendHaChannelToWatch(message.event || {});
     }
   };
 

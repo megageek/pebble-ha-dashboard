@@ -114,29 +114,13 @@ function freshEnv() {
     return null;
   }
 
-  function sendChannelEvent(channel, value, label, onColor, offColor, hideWhen, bgColor, valueColor, labelColor) {
-    var data = { channel: channel, value: value };
-    if (label !== undefined) {
-      data.label = label;
-    }
-    if (onColor !== undefined) {
-      data.on_color = onColor;
-    }
-    if (offColor !== undefined) {
-      data.off_color = offColor;
-    }
-    if (hideWhen !== undefined) {
-      data.hide_when = hideWhen;
-    }
-    if (bgColor !== undefined) {
-      data.bg_color = bgColor;
-    }
-    if (valueColor !== undefined) {
-      data.value_color = valueColor;
-    }
-    if (labelColor !== undefined) {
-      data.label_color = labelColor;
-    }
+  // Takes the raw event payload object directly (channel/value/label/
+  // on_color/off_color/hide_when/bg_color/value_color/label_color/kind/
+  // unit/min/max/style, all optional except channel/value) rather than a
+  // long positional list — mirrors sendHaChannelToWatch()'s own item-object
+  // shape in src/pkjs/index.js, and means omitting a field is just omitting
+  // a key instead of threading `undefined` through earlier positions.
+  function sendChannelEvent(data) {
     lastSocket.onmessage({
       data: JSON.stringify({ id: subscriptionId(), type: "event", event: data }),
     });
@@ -244,9 +228,9 @@ function freshEnv() {
   var env = freshEnv();
   env.authenticate();
 
-  env.sendChannelEvent(1, "72F", "Temp");
-  env.sendChannelEvent(2, "Open", "Door");
-  env.sendChannelEvent(3, "On", "Light");
+  env.sendChannelEvent({ channel: 1, value: "72F", label: "Temp" });
+  env.sendChannelEvent({ channel: 2, value: "Open", label: "Door" });
+  env.sendChannelEvent({ channel: 3, value: "On", label: "Light" });
 
   assert(env.sentAppMessages.length === 3, "relayed 3 separate AppMessages, got " + env.sentAppMessages.length);
   assert(
@@ -268,7 +252,7 @@ function freshEnv() {
   var env = freshEnv();
   env.authenticate();
 
-  env.sendChannelEvent(2, "73F"); // no label passed
+  env.sendChannelEvent({ channel: 2, value: "73F" }); // no label passed
 
   assert(env.sentAppMessages.length === 1, "relayed one AppMessage for a value-only update");
   var msg = env.sentAppMessages[0];
@@ -283,7 +267,7 @@ function freshEnv() {
 
   var longValue = "123456789012345678901234567890"; // 30 chars
   var longLabel = "A Very Long Sensor Label"; // 24 chars
-  env.sendChannelEvent(1, longValue, longLabel);
+  env.sendChannelEvent({ channel: 1, value: longValue, label: longLabel });
 
   var msg = env.sentAppMessages[0];
   assert(
@@ -302,7 +286,7 @@ function freshEnv() {
   var env = freshEnv();
   env.authenticate();
 
-  env.sendChannelEvent(2, "on", "Door", "red", "green", "off");
+  env.sendChannelEvent({ channel: 2, value: "on", label: "Door", on_color: "red", off_color: "green", hide_when: "off" });
 
   assert(env.sentAppMessages.length === 1, "relayed one AppMessage for a dot-styled update");
   var msg = env.sentAppMessages[0];
@@ -317,7 +301,7 @@ function freshEnv() {
   var env = freshEnv();
   env.authenticate();
 
-  env.sendChannelEvent(3, "off", undefined, "blue"); // only on_color, no label/off_color/hide_when
+  env.sendChannelEvent({ channel: 3, value: "off", on_color: "blue" }); // only on_color, no label/off_color/hide_when
 
   var msg = env.sentAppMessages[0];
   assert(
@@ -336,7 +320,10 @@ function freshEnv() {
   var env = freshEnv();
   env.authenticate();
 
-  env.sendChannelEvent(1, "21.5C", "Temp", undefined, undefined, undefined, "purple", "yellow", "blue");
+  env.sendChannelEvent({
+    channel: 1, value: "21.5C", label: "Temp",
+    bg_color: "purple", value_color: "yellow", label_color: "blue",
+  });
 
   var msg = env.sentAppMessages[env.sentAppMessages.length - 1];
   assert(
@@ -354,9 +341,9 @@ function freshEnv() {
   var env = freshEnv();
   env.authenticate();
 
-  env.sendChannelEvent(0, "x", "y");
-  env.sendChannelEvent(11, "x", "y");
-  env.sendChannelEvent("not-a-number", "x", "y");
+  env.sendChannelEvent({ channel: 0, value: "x", label: "y" });
+  env.sendChannelEvent({ channel: 11, value: "x", label: "y" });
+  env.sendChannelEvent({ channel: "not-a-number", value: "x", label: "y" });
 
   assert(env.sentAppMessages.length === 0, "no AppMessage sent for out-of-range channels, got " + env.sentAppMessages.length);
 })();
@@ -367,8 +354,8 @@ function freshEnv() {
   var env = freshEnv();
   env.authenticate();
 
-  env.sendChannelEvent(4, "on", "Fan");
-  env.sendChannelEvent(10, "68F", "Attic");
+  env.sendChannelEvent({ channel: 4, value: "on", label: "Fan" });
+  env.sendChannelEvent({ channel: 10, value: "68F", label: "Attic" });
 
   assert(env.sentAppMessages.length === 2, "relayed both extended-range channels, got " + env.sentAppMessages.length);
   assert(
@@ -378,6 +365,64 @@ function freshEnv() {
   assert(
     env.sentAppMessages[1].HA10_VALUE === "68F" && env.sentAppMessages[1].HA10_LABEL === "Attic",
     "channel 10 (the new upper bound) relayed correctly, got " + JSON.stringify(env.sentAppMessages[1])
+  );
+})();
+
+// --- Test 7c: kind="numeric" sends HAn_VALUE as a number (not a string)
+// plus HAn_KIND/HAn_UNIT relaying ---
+(function testNumericChannelRelay() {
+  var env = freshEnv();
+  env.authenticate();
+
+  env.sendChannelEvent({ channel: 1, value: 21, label: "Temp", kind: "numeric", unit: "C" });
+
+  var msg = env.sentAppMessages[0];
+  assert(
+    msg.HA1_VALUE === 21 && typeof msg.HA1_VALUE === "number",
+    "numeric value sent as a number, got " + JSON.stringify(msg.HA1_VALUE) + " (" + typeof msg.HA1_VALUE + ")"
+  );
+  assert(msg.HA1_KIND === "numeric" && msg.HA1_UNIT === "C", "kind/unit relayed correctly, got " + JSON.stringify(msg));
+})();
+
+// --- Test 7d: kind="binary" also sends HAn_VALUE as a number ---
+(function testBinaryChannelRelay() {
+  var env = freshEnv();
+  env.authenticate();
+
+  env.sendChannelEvent({ channel: 2, value: 1, label: "Door", kind: "binary" });
+
+  var msg = env.sentAppMessages[0];
+  assert(
+    msg.HA2_VALUE === 1 && typeof msg.HA2_VALUE === "number" && msg.HA2_KIND === "binary",
+    "binary value sent as a number with kind relayed, got " + JSON.stringify(msg)
+  );
+})();
+
+// --- Test 7e: min/max/style relay together for a ranged numeric channel ---
+(function testRangeAndStyleRelay() {
+  var env = freshEnv();
+  env.authenticate();
+
+  env.sendChannelEvent({ channel: 3, value: 45, kind: "numeric", min: 0, max: 100, style: "bar" });
+
+  var msg = env.sentAppMessages[0];
+  assert(
+    msg.HA3_MIN === 0 && msg.HA3_MAX === 100 && msg.HA3_STYLE === "bar",
+    "min/max/style relayed correctly, got " + JSON.stringify(msg)
+  );
+})();
+
+// --- Test 7f: min sent without max is dropped entirely, not sent half-set ---
+(function testMinWithoutMaxDropped() {
+  var env = freshEnv();
+  env.authenticate();
+
+  env.sendChannelEvent({ channel: 4, value: 10, kind: "numeric", min: 0 });
+
+  var msg = env.sentAppMessages[0];
+  assert(
+    !("HA4_MIN" in msg) && !("HA4_MAX" in msg),
+    "min without max is not relayed, got " + JSON.stringify(msg)
   );
 })();
 

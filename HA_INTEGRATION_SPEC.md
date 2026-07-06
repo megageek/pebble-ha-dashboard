@@ -6,7 +6,7 @@ Two independent flows share the one WebSocket connection:
 1. **HA → watch**: channel data (`subscribe_channels`), covered first below.
 2. **Watch → HA**: battery/health/device status reports (`report_status`), covered after that.
 
-*Last synced with `pebble-ha-dashboard` commit `530ed7b` (2026-07-06).*
+*Last synced with `pebble-ha-dashboard` commit `7c557fe` (2026-07-06).*
 
 **This requires a real custom integration, not just automations.** Home Assistant's generic event bus (`fire_event`/`subscribe_events`) is no longer used — instead the integration registers its own WebSocket API command. That means someone needs to write a `custom_components/<domain>/` Python package with a `websocket_api.async_register_command` handler; this can't be wired up purely through the UI/YAML automations the way a "fire an event on state change" approach could.
 

@@ -8,8 +8,7 @@
     },
     "extensions": [
         "ms-vscode-remote.remote-containers",
-        "ms-python.python",
-        "ms-vscode.vscode-node-azure-pack"
+        "ms-python.python"
     ],
     "remoteUser": "pebble",
     "postCreateCommand": "zsh -c 'source ~/.zshrc && pebble --version'",

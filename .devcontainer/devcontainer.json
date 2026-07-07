@@ -4,25 +4,32 @@
     "service": "pebble-sdk",
     "workspaceFolder": "/workspace",
     "settings": {
-        "terminal.integrated.defaultProfile.linux": "zsh",
+        "terminal.integrated.defaultProfile.linux": "zsh"
     },
-    "extensions": [
-        "ms-vscode-remote.remote-containers",
-        "ms-python.python"
-    ],
+    "customizations": {
+        "vscode": {
+            "extensions": [
+                "ms-vscode-remote.remote-containers",
+                "ms-python.python",
+                "Anthropic.claude-code",
+                "ms-vscode.cpptools-extension-pack"
+            ]
+        }
+    },
     "remoteUser": "pebble",
     "postCreateCommand": "zsh -c 'source ~/.zshrc && pebble --version'",
+    // /tmp is ephemeral (cleared on every container start/restart, not just rebuild), but X11 clients
+    // hardcode /tmp/.X11-unix/X<N> for DISPLAY=:N — WSLg's real socket lives at /mnt/wslg/.X11-unix
+    // (bind-mounted from the host in docker-compose.yml), so relink it on every start.
+    "postStartCommand": "sh -c 'rm -rf /tmp/.X11-unix; ln -sfn /mnt/wslg/.X11-unix /tmp/.X11-unix'",
     "runArgs": [
-        "--network=host",
-        "--env",
-        "DISPLAY=${DISPLAY}"
+        "--network=host"
     ],
     "containerEnv": {
         "PEBBLE_SDK_VERSION": "4.17",
         "NVM_VERSION": "0.35.0",
         "NODE_VERSION": "20",
-        "NVM_DIR": "/home/pebble/.nvm",
-        "DISPLAY": "${DISPLAY}"
+        "NVM_DIR": "/home/pebble/.nvm"
     },
     "shutdownAction": "stopCompose"
 }

@@ -14,13 +14,17 @@ services:
     restart: unless-stopped
     volumes:
       - ..:/workspace
-      - /tmp/.X11-unix:/tmp/.X11-unix  # Enable GUI apps like the emulator
+      - /mnt/host/wslg:/mnt/wslg  # Docker Desktop's WSL2 VM exposes the real WSLg sockets under /mnt/host/wslg, not /mnt/wslg (that path is empty in the docker-desktop VM itself)
     environment:
       - PEBBLE_SDK_VERSION=4.17
       - NVM_VERSION=0.35.0
       - NODE_VERSION=20
       - NVM_DIR=/home/pebble/.nvm
-      - DISPLAY=${DISPLAY}  # Enable GUI for emulator
+      - DISPLAY=:0  # WSLg's fixed X11 display, backed by /mnt/wslg/.X11-unix/X0
+      - WAYLAND_DISPLAY=wayland-0
+      - XDG_RUNTIME_DIR=/mnt/wslg/runtime-dir
+      - PULSE_SERVER=/mnt/wslg/PulseServer
+      - SDL_VIDEODRIVER=x11  # Use XWayland instead of native Wayland+libdecor for the emulator window
     ports:
       - "59443:59443"  # Required for emulator
     network_mode: "host"  # Required for proper emulator display on some systems

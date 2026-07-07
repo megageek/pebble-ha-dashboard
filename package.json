@@ -2,6 +2,7 @@
   "name": "pebble-ha-dashboard",
   "author": "Mark Johnson",
   "version": "1.0.0",
+  "license": "MIT",
   "keywords": [
     "pebble-app"
   ],

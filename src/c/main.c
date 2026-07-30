@@ -50,15 +50,16 @@ static void init(void) {
     // Was app_message_inbox_size_maximum()/outbox_size_maximum() — the
     // platform maximum, 8200 bytes each (confirmed via APP_LOG at
     // app_message_open() time: "This consumes 8200 bytes of heap memory").
-    // Real-device testing found every webviewclosed-triggered config send
-    // failing outright regardless of content/size/timing/WebSocket
-    // state/app identity — everything this repo's code controls. A
-    // known-working reference watchface (peerdavid/pebble-mesh) requests
-    // fixed, modest buffers (768/128) instead of the platform maximum.
-    // 1024/512 here comfortably covers this app's largest actual
+    // Requesting the platform max was unnecessarily wasteful for what this
+    // app actually sends; 1024/512 comfortably covers the largest real
     // transactions (a 15-key config chunk, a 13-field HA channel update, a
-    // ~12-field status report with the REPORT_DISABLED string) with margin,
-    // while staying far below the maximum this app had been requesting.
+    // ~12-field status report) with margin. Tried during a real-device
+    // config-save investigation on the theory that the oversized buffer
+    // request was implicated in send failures — it wasn't (real-device
+    // testing after the actual fix, in src/pkjs/index.js, confirmed the
+    // failures had a JS-side content cause, not a buffer-size one) — kept
+    // anyway as a genuine improvement, not evidence of anything about the
+    // platform.
     app_message_open(1024, 512);
 
     send_device_info();

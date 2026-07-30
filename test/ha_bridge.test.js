@@ -31,6 +31,24 @@ var STYLING_COLOR_LIMIT = 7;
 
 var failures = 0;
 
+// Real Clay WebView responses wrap every field as {value: X, ...}, not a
+// flat value — clay.getSettings(response, false) just returns
+// JSON.parse(response) verbatim (see node_modules/pebble-clay's own
+// getSettings() source), so whatever shape is in the response string IS
+// what index.js receives. A real-device bug (settings[key] used directly,
+// never unwrapping .value) went undetected for a long time because the
+// flat objects previously used here for fake responses skip the exact
+// unwrapping step real Clay output requires. Every fake webviewclosed
+// response in this file must go through this helper, not raw
+// JSON.stringify(), to actually exercise that unwrapping path.
+function clayResponse(flatSettings) {
+  var wrapped = {};
+  Object.keys(flatSettings).forEach(function (key) {
+    wrapped[key] = { value: flatSettings[key] };
+  });
+  return JSON.stringify(wrapped);
+}
+
 function assert(cond, msg) {
   if (!cond) {
     failures++;
@@ -686,7 +704,7 @@ function freshEnv() {
 
   env.fire(
     "webviewclosed",
-    { response: JSON.stringify({ HA_URL: "http://still-bad.local:8123", HA_TOKEN: "t" }) }
+    { response: clayResponse({ HA_URL: "http://still-bad.local:8123", HA_TOKEN: "t" }) }
   );
   env.getLastSocket().onclose();
   assert(env.notifications.length === 2, "a fresh failure after a config save notifies again, got " + env.notifications.length);
@@ -711,16 +729,17 @@ function freshEnv() {
   env.authenticate();
   var oldSocket = env.getLastSocket();
 
-  env.fire("webviewclosed", { response: JSON.stringify({ HA_URL: "", HA_TOKEN: "" }) });
+  env.fire("webviewclosed", { response: clayResponse({ HA_URL: "", HA_TOKEN: "" }) });
 
   assert(oldSocket.closed === true, "the previously-open socket is closed when config is cleared");
   assert(env.getLastSocket() === oldSocket, "no new socket is opened for an unset config");
 })();
 
-// --- Test 8f: a failed AppMessage send (e.g. the phone's own Bluetooth
-// session still warming up right after the Pebble app restarts) is
-// retried after a delay instead of being dropped forever, and succeeds
-// once the retry goes through ---
+// --- Test 8f: a failed AppMessage send is retried after a delay instead
+// of being dropped forever, and succeeds once the retry goes through.
+// Retries exist for genuinely transient conditions — see
+// APP_MESSAGE_RETRY_DELAY_MS's comment in src/pkjs/index.js for why that's
+// not a license to assume every failure is transient/external. ---
 (function testFailedSendRetriesAndSucceeds() {
   var env = freshEnv();
   env.authenticate();
@@ -808,9 +827,7 @@ function freshEnv() {
   var firstSocket = env.getLastSocket();
   assert(firstSocket.url === "http://ha.local:8123/api/websocket", "initial connect uses the original URL");
 
-  // A flat JSON string (starts with "{") is accepted by Clay.getSettings()
-  // without needing URI-decoding — see its `response.match(/^\{/)` check.
-  var claySavePayload = JSON.stringify({
+  var claySavePayload = clayResponse({
     TEMPLATE_INDEX: 1,
     SLOT_0_CHANNEL: 4,
     SLOT_1_CHANNEL: 1,
@@ -872,10 +889,11 @@ function freshEnv() {
   var env = freshEnv();
   env.fire("ready");
 
-  // Matches exactly what Clay's real getSettings(e.response, false) returns
-  // for select components: every value is a string, regardless of how
-  // config.js declared the option's `value`.
-  var claySavePayload = JSON.stringify({
+  // clayResponse() wraps each of these in {value: X}, matching Clay's real
+  // wire format; the string values themselves match what a "select"
+  // component actually produces, regardless of how config.js declared the
+  // option's `value`.
+  var claySavePayload = clayResponse({
     TEMPLATE_INDEX: "1",
     SLOT_0_CHANNEL: "4",
     DOT_GROUP_SLOT: "2",
@@ -906,6 +924,90 @@ function freshEnv() {
     "CHARGE_ON_COLOR (a color select) is left as a string, not coerced, got " +
       JSON.stringify(watchMsg.CHARGE_ON_COLOR) + " (" + typeof watchMsg.CHARGE_ON_COLOR + ")"
   );
+})();
+
+// --- Test 9a-3: every one of the 69 WATCH_SETTINGS_KEYS fields has the JS
+// type main.c's config_message.c actually expects off the wire, all sent
+// together in one realistic save. This is the type-level counterpart to
+// Test 9b's chunking coverage — it exists because Test 9a-2 above only
+// sample-checked a few fields, and the real bug (TEMPLATE_INDEX/
+// SLOT_n_CHANNEL/DOT_* sent as Clay's native strings instead of numbers)
+// was found by manually auditing every field against config_message.c's
+// exact reads: 24 fields (TEMPLATE_INDEX, 10x SLOT_n_CHANNEL,
+// 7x REPORT_ENABLE_*, DOT_GROUP_SLOT, 4x DOT_n_CHANNEL, DOT_SIZE) are read
+// with a blind dict_find(...)->value->int32 and MUST arrive as numbers;
+// the other 45 (color/hide-when selects) are read behind a
+// `type == TUPLE_CSTRING` check and MUST stay strings. Values below mirror
+// exactly what real Clay produces for each component: "select" always
+// returns a string (even for numeric-looking options), "toggle" returns a
+// real boolean. ---
+(function testAllConfigFieldTypesMatchWatchExpectations() {
+  var env = freshEnv();
+  env.fire("ready");
+
+  var claySettings = {
+    TEMPLATE_INDEX: "1", // select -> string from Clay
+    DOT_GROUP_SLOT: "2",
+    DOT_SIZE: "1",
+  };
+  for (var i = 0; i < 10; i++) {
+    claySettings["SLOT_" + i + "_CHANNEL"] = String(i);
+  }
+  for (var j = 0; j < 4; j++) {
+    claySettings["DOT_" + j + "_CHANNEL"] = String(j + 1);
+  }
+  [
+    "REPORT_ENABLE_BATTERY", "REPORT_ENABLE_STEPS", "REPORT_ENABLE_ACTIVITY", "REPORT_ENABLE_SLEEP",
+    "REPORT_ENABLE_HEART_RATE", "REPORT_ENABLE_CONNECTED", "REPORT_ENABLE_DEVICE_INFO",
+  ].forEach(function (key) {
+    claySettings[key] = true; // toggle -> real boolean from Clay
+  });
+  var colorFields = [
+    "CHARGE_ON_COLOR", "CHARGE_OFF_COLOR", "CHARGE_HIDE_WHEN",
+    "CONN_ON_COLOR", "CONN_OFF_COLOR", "CONN_HIDE_WHEN",
+  ];
+  ["TIME", "DATE", "BATTERY", "STEPS", "CHARGE", "CONN", "ACTIVE_MINUTES", "DISTANCE",
+   "ACTIVE_KCAL", "RESTING_KCAL", "SLEEP_MINUTES", "SLEEP_RESTFUL_MINUTES", "HEART_RATE"].forEach(function (prefix) {
+    colorFields.push(prefix + "_BG_COLOR", prefix + "_VALUE_COLOR", prefix + "_LABEL_COLOR");
+  });
+  colorFields.forEach(function (key) {
+    claySettings[key] = "purple"; // select (color/hide-when) -> string from Clay
+  });
+
+  assert(
+    Object.keys(claySettings).length === 69,
+    "test setup sanity check: exactly 69 WATCH_SETTINGS_KEYS fields, got " + Object.keys(claySettings).length
+  );
+
+  var pendingCallbacks = [];
+  global.Pebble.sendAppMessage = function (dict, onSuccess) {
+    env.sentAppMessages.push(dict);
+    pendingCallbacks.push(onSuccess);
+  };
+
+  env.fire("webviewclosed", { response: clayResponse(claySettings) });
+  while (pendingCallbacks.length > 0) {
+    pendingCallbacks.shift()();
+  }
+
+  var merged = {};
+  env.sentAppMessages.forEach(function (chunk) {
+    Object.keys(chunk).forEach(function (k) { merged[k] = chunk[k]; });
+  });
+
+  var numericKeys = Object.keys(merged).filter(function (k) {
+    return /^(TEMPLATE_INDEX|SLOT_\d+_CHANNEL|REPORT_ENABLE_\w+|DOT_GROUP_SLOT|DOT_\d+_CHANNEL|DOT_SIZE)$/.test(k);
+  });
+  assert(numericKeys.length === 24, "found all 24 numerically-read fields, got " + numericKeys.length);
+  numericKeys.forEach(function (k) {
+    assert(typeof merged[k] === "number", k + " sent as a number (watch reads it with a blind ->value->int32), got " + typeof merged[k]);
+  });
+
+  var stringKeys = Object.keys(merged).filter(function (k) { return numericKeys.indexOf(k) === -1; });
+  assert(stringKeys.length === 45, "found all 45 string-read (TUPLE_CSTRING-checked) fields, got " + stringKeys.length);
+  stringKeys.forEach(function (k) {
+    assert(typeof merged[k] === "string", k + " left as a string (watch requires TUPLE_CSTRING), got " + typeof merged[k]);
+  });
 })();
 
 // --- Test 9b: a full-size config save (all 69 WATCH_SETTINGS_KEYS, as a
@@ -941,7 +1043,7 @@ function freshEnv() {
     fullSettings["DOT_" + j + "_CHANNEL"] = j;
   }
 
-  env.fire("webviewclosed", { response: JSON.stringify(fullSettings) });
+  env.fire("webviewclosed", { response: clayResponse(fullSettings) });
 
   var expectedKeyCount = Object.keys(fullSettings).length - 2; // minus HA_URL/HA_TOKEN
   var expectedChunkCount = Math.ceil(expectedKeyCount / 15);
@@ -1004,7 +1106,7 @@ function freshEnv() {
 
   env.fire(
     "webviewclosed",
-    { response: JSON.stringify({ TEMPLATE_INDEX: 1, HA_URL: "http://ha.local:8123", HA_TOKEN: "testtoken" }) }
+    { response: clayResponse({ TEMPLATE_INDEX: 1, HA_URL: "http://ha.local:8123", HA_TOKEN: "testtoken" }) }
   );
 
   assert(attempts === 1, "first send attempt happens immediately, got " + attempts);
@@ -1042,7 +1144,7 @@ function freshEnv() {
 
   env.fire(
     "webviewclosed",
-    { response: JSON.stringify({ TEMPLATE_INDEX: 1, HA_URL: "http://ha.local:8123", HA_TOKEN: "testtoken" }) }
+    { response: clayResponse({ TEMPLATE_INDEX: 1, HA_URL: "http://ha.local:8123", HA_TOKEN: "testtoken" }) }
   );
 
   assert(

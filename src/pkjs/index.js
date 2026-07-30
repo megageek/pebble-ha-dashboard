@@ -105,10 +105,52 @@ for (var numDotIdx = 0; numDotIdx < 4; numDotIdx++) {
   NUMERIC_SETTINGS_KEYS["DOT_" + numDotIdx + "_CHANNEL"] = true;
 }
 
+// Real-device testing found REPORT_ENABLE_BATTERY (a Clay "toggle" field)
+// failing to send reliably, tracked down to the same root cause as
+// extractClaySettingValue() below: without that unwrap, `value` here was
+// the wrapper object Clay actually returns, not a real boolean, so the
+// plain `typeof value === "boolean"` check always missed it and every
+// toggle silently sent as 0 regardless of its real state. Now that
+// extractClaySettingValue() runs first, `value` is the genuine boolean and
+// that fallback check below is sufficient on its own — this explicit
+// membership set is kept as a second line of defense (tolerant of string/
+// numeric truthy representations too) rather than relying on typeof alone
+// a second time.
+var BOOLEAN_SETTINGS_KEYS = {
+  REPORT_ENABLE_BATTERY: true,
+  REPORT_ENABLE_STEPS: true,
+  REPORT_ENABLE_ACTIVITY: true,
+  REPORT_ENABLE_SLEEP: true,
+  REPORT_ENABLE_HEART_RATE: true,
+  REPORT_ENABLE_CONNECTED: true,
+  REPORT_ENABLE_DEVICE_INFO: true,
+};
+
+// clay.getSettings(response, false) returns each field as an object
+// wrapping the actual value (e.g. {value: "green"}), not the raw value
+// directly — confirmed on real hardware via a diagnostic log showing
+// CHARGE_ON_COLOR's raw settings entry as {"value":"green"} (typeof
+// "object"). A known-working reference watchface (peerdavid/pebble-mesh)
+// always does `dict.FIELD.value` for exactly this reason; this code never
+// did, for any field. Numeric fields "worked" only by accident — Number()
+// on the wrapper object coerces via its toString() — while string fields
+// were sent as literal unencodable objects, and the boolean coercion's
+// strict `=== true` checks always failed against an object, silently
+// forcing every toggle to 0 regardless of its real state.
+function extractClaySettingValue(settingEntry) {
+  if (settingEntry && typeof settingEntry === "object" && "value" in settingEntry) {
+    return settingEntry.value;
+  }
+  return settingEntry;
+}
+
 function coerceWatchSettingValue(key, value) {
-  // Clay's "toggle" component (REPORT_ENABLE_*) reads a checkbox's raw
-  // .checked property, i.e. a JS boolean, not the 0/1 int the C side and
-  // AppMessage expect.
+  if (BOOLEAN_SETTINGS_KEYS[key]) {
+    return (value === true || value === "true" || value === 1 || value === "1") ? 1 : 0;
+  }
+  // Clay's "toggle" component reads a checkbox's raw .checked property,
+  // i.e. a JS boolean, not the 0/1 int the C side and AppMessage expect —
+  // kept as a fallback for any other boolean-shaped field not listed above.
   if (typeof value === "boolean") {
     return value ? 1 : 0;
   }
@@ -141,7 +183,7 @@ Pebble.addEventListener("webviewclosed", function (e) {
     if (settings[key] === undefined) {
       return;
     }
-    watchSettings[key] = coerceWatchSettingValue(key, settings[key]);
+    watchSettings[key] = coerceWatchSettingValue(key, extractClaySettingValue(settings[key]));
   });
 
   // Previously deferred via setTimeout, on the theory that Android could
@@ -161,12 +203,22 @@ Pebble.addEventListener("webviewclosed", function (e) {
 });
 
 // Pebble.sendAppMessage() can fail with "Failed to connect to Pebble" for
-// reasons outside this code's control (observed on a real Android phone
-// most often in the first few seconds after the Pebble app itself
-// (re)starts, before its own Bluetooth session to the watch has finished
-// warming up). Retrying after a short delay, the same pattern already used
-// for the HA WebSocket connection (see scheduleHaReconnect below), recovers
-// from that transient window instead of dropping the send forever.
+// genuinely transient reasons (e.g. the Pebble app's Bluetooth session to
+// the watch still warming up in the first few seconds after it restarts).
+// Retrying after a short delay, the same pattern already used for the HA
+// WebSocket connection (see scheduleHaReconnect below), recovers from that
+// window instead of dropping the send forever.
+//
+// This is not a substitute for finding the actual cause of a failure that
+// keeps happening. A long real-device investigation (see CLAUDE.md's Clay
+// config page section and the pebble-android-stuck-appmessage memory)
+// spent most of a session assuming persistent config-save failures were
+// this kind of external, unfixable Bluetooth/OS flakiness, when the real
+// cause was a content bug in this file (Clay's getSettings() results were
+// never unwrapped from {value: X}, so malformed messages were being sent —
+// which the phone was correctly failing to deliver). If a send fails
+// consistently rather than occasionally, suspect the message content
+// first, not the platform.
 var APP_MESSAGE_RETRY_DELAY_MS = 3000;
 var APP_MESSAGE_MAX_ATTEMPTS = 5;
 var APP_MESSAGE_CALLBACK_TIMEOUT_MS = 10000;

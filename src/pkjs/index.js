@@ -80,6 +80,44 @@ var WATCH_SETTINGS_KEYS = [
   "HEART_RATE_LABEL_COLOR",
 ];
 
+// Clay's "select" component always returns its value as a JS string — an
+// HTML <option value="..."> is inherently string-typed, regardless of
+// whether config.js declared the option's `value` as a number. The C side
+// reads these fields with dict_find(...)->value->int32 with no type check
+// (main.c's inbox_received_callback()), so a value that actually arrived
+// as a CSTRING tuple (because it was a JS string here) gets its raw byte
+// buffer reinterpreted as an int32 — garbage, not the intended number, and
+// on real hardware this was implicated in webviewclosed-triggered
+// AppMessage sends failing outright. A known-working reference watchface
+// (peerdavid/pebble-mesh) explicitly parseInt()s every one of its own
+// numeric select values before sending; this is that same fix, applied to
+// every integer-typed select field here. Color/hide-when selects are
+// deliberately excluded — those are meant to stay strings.
+var NUMERIC_SETTINGS_KEYS = {
+  TEMPLATE_INDEX: true,
+  DOT_GROUP_SLOT: true,
+  DOT_SIZE: true,
+};
+for (var numSlotIdx = 0; numSlotIdx < 10; numSlotIdx++) {
+  NUMERIC_SETTINGS_KEYS["SLOT_" + numSlotIdx + "_CHANNEL"] = true;
+}
+for (var numDotIdx = 0; numDotIdx < 4; numDotIdx++) {
+  NUMERIC_SETTINGS_KEYS["DOT_" + numDotIdx + "_CHANNEL"] = true;
+}
+
+function coerceWatchSettingValue(key, value) {
+  // Clay's "toggle" component (REPORT_ENABLE_*) reads a checkbox's raw
+  // .checked property, i.e. a JS boolean, not the 0/1 int the C side and
+  // AppMessage expect.
+  if (typeof value === "boolean") {
+    return value ? 1 : 0;
+  }
+  if (NUMERIC_SETTINGS_KEYS[key]) {
+    return Number(value);
+  }
+  return value;
+}
+
 Pebble.addEventListener("showConfiguration", function () {
   Pebble.openURL(clay.generateUrl());
 });
@@ -103,25 +141,130 @@ Pebble.addEventListener("webviewclosed", function (e) {
     if (settings[key] === undefined) {
       return;
     }
-    var value = settings[key];
-    // Clay's "toggle" component (REPORT_ENABLE_*) reads a checkbox's raw
-    // .checked property, i.e. a JS boolean, not the 0/1 int the C side and
-    // AppMessage expect.
-    watchSettings[key] = typeof value === "boolean" ? (value ? 1 : 0) : value;
+    watchSettings[key] = coerceWatchSettingValue(key, settings[key]);
   });
 
-  Pebble.sendAppMessage(
-    watchSettings,
-    function () {
-      console.log("Config sent to watch");
-    },
-    function (err) {
-      console.log("Failed to send config: " + JSON.stringify(err));
-    }
-  );
+  // Previously deferred via setTimeout, on the theory that Android could
+  // close the Clay WebView before PebbleKit had restored the app-message
+  // bridge used by this callback. Real-device testing disproved that: every
+  // config save failed outright regardless of message size, chunking,
+  // retries, or HA WebSocket overlap (all ruled out separately) — and a
+  // known-working reference watchface (peerdavid/pebble-mesh) sends its own
+  // config synchronously, with no defer at all, directly inside its
+  // webviewclosed handler, and does so reliably. Dispatching synchronously
+  // here too, matching that working pattern.
+  sendWatchSettings(watchSettings, connectToHomeAssistant);
 
-  connectToHomeAssistant();
+  // A config save is a fresh user-initiated attempt — allow a failure to
+  // notify again even if the previous URL/token already triggered one.
+  haFailureNotified = false;
 });
+
+// Pebble.sendAppMessage() can fail with "Failed to connect to Pebble" for
+// reasons outside this code's control (observed on a real Android phone
+// most often in the first few seconds after the Pebble app itself
+// (re)starts, before its own Bluetooth session to the watch has finished
+// warming up). Retrying after a short delay, the same pattern already used
+// for the HA WebSocket connection (see scheduleHaReconnect below), recovers
+// from that transient window instead of dropping the send forever.
+var APP_MESSAGE_RETRY_DELAY_MS = 3000;
+var APP_MESSAGE_MAX_ATTEMPTS = 5;
+var APP_MESSAGE_CALLBACK_TIMEOUT_MS = 10000;
+var appMessageQueue = [];
+var appMessageSending = false;
+
+function pumpAppMessageQueue() {
+  if (appMessageSending || appMessageQueue.length === 0) return;
+  appMessageSending = true;
+  var entry = appMessageQueue[0];
+
+  function finish() {
+    appMessageQueue.shift();
+    appMessageSending = false;
+    pumpAppMessageQueue();
+    // Fires whether this entry succeeded or gave up after exhausting
+    // retries — unlike onSuccess, which only fires on success. Lets a
+    // caller know delivery is *done* (not necessarily successful) so it can
+    // safely start other AppMessage/network activity without overlapping
+    // this entry's own retries.
+    if (entry.onSettled) entry.onSettled();
+  }
+
+  function attemptSend() {
+    entry.attempt++;
+    var settled = false;
+    var callbackTimer;
+
+    function failed(err) {
+      if (settled) return;
+      settled = true;
+      clearTimeout(callbackTimer);
+      console.log("Failed to send " + entry.description + " (attempt " + entry.attempt + "): " + JSON.stringify(err));
+      if (entry.attempt >= APP_MESSAGE_MAX_ATTEMPTS) {
+        console.log("Giving up sending " + entry.description + " after " + entry.attempt + " attempts");
+        finish();
+        return;
+      }
+      setTimeout(attemptSend, APP_MESSAGE_RETRY_DELAY_MS);
+    }
+
+    callbackTimer = setTimeout(function () {
+      failed({ error: "Pebble.sendAppMessage callback timeout" });
+    }, APP_MESSAGE_CALLBACK_TIMEOUT_MS);
+
+    Pebble.sendAppMessage(entry.dict, function () {
+      if (settled) return;
+      settled = true;
+      clearTimeout(callbackTimer);
+      if (entry.onSuccess) entry.onSuccess();
+      finish();
+    }, failed);
+  }
+
+  attemptSend();
+}
+
+// PebbleKit AppMessage has one in-flight transaction. Clay config chunks
+// and HA updates must therefore share one global queue.
+function sendAppMessageWithRetry(dict, description, onSuccess, onSettled) {
+  appMessageQueue.push({ dict: dict, description: description, onSuccess: onSuccess, onSettled: onSettled, attempt: 0 });
+  pumpAppMessageQueue();
+}
+
+// The full config surface (WATCH_SETTINGS_KEYS) is 69 keys — 10 slots, 7
+// report toggles, dot config, and 39 per-channel color fields. Splitting
+// into smaller chunks sent strictly sequentially (each waiting for the
+// previous chunk's ack before the next is sent) keeps any one message
+// modest in size, on top of the retry behavior above.
+var CONFIG_CHUNK_SIZE = 15;
+
+// onComplete (if given) fires once every chunk has settled — the last
+// chunk either succeeded or gave up after exhausting retries — so a caller
+// can sequence other AppMessage/network activity (see the HA reconnect
+// deferral in webviewclosed above) to start only once this burst is
+// entirely finished, not while it's still in flight.
+function sendWatchSettings(watchSettings, onComplete) {
+  var keys = Object.keys(watchSettings);
+  if (keys.length === 0) {
+    console.log("Config sent to watch");
+    if (onComplete) onComplete();
+    return;
+  }
+
+  for (var index = 0; index < keys.length; index += CONFIG_CHUNK_SIZE) {
+    var chunk = {};
+    keys.slice(index, index + CONFIG_CHUNK_SIZE).forEach(function (key) {
+      chunk[key] = watchSettings[key];
+    });
+    var isLastChunk = index + CONFIG_CHUNK_SIZE >= keys.length;
+    sendAppMessageWithRetry(
+      chunk,
+      "config chunk",
+      isLastChunk ? function () { console.log("Config sent to watch"); } : null,
+      isLastChunk ? onComplete : null
+    );
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Home Assistant WebSocket bridge
@@ -154,6 +297,12 @@ var haSubscriptionId = null;
 // True only between auth_ok and the connection being replaced/dropped —
 // gates outbound status reports so they're never sent to a half-open socket.
 var haAuthenticated = false;
+// Set the first time a connection attempt fails (auth_invalid, or a close
+// without ever reaching auth_ok) since the last user-initiated attempt
+// (app launch or a Clay config save). Without this, a bad URL/token would
+// renotify on every automatic reconnect forever, since scheduleHaReconnect()
+// retries indefinitely.
+var haFailureNotified = false;
 // Sticky per-channel "kind" cache (phone-side). The watch's ch->kind is
 // already sticky (see apply_ha_channel_updates() in main.c); HA is allowed
 // to send `kind` once and omit it on every later value-only update (see
@@ -177,6 +326,20 @@ function getHaConfig() {
     url: settings.HA_URL || "",
     token: settings.HA_TOKEN || "",
   };
+}
+
+// Surfaces a connection/auth problem as a watch notification, since pkjs has
+// no UI of its own and console.log is otherwise invisible outside `pebble
+// logs`. Only fires once per haFailureNotified cycle — see its declaration
+// above for why repeats are suppressed.
+function notifyHaConnectionFailure(message) {
+  if (haFailureNotified) {
+    return;
+  }
+  haFailureNotified = true;
+  if (typeof Pebble.showSimpleNotificationOnPebble === "function") {
+    Pebble.showSimpleNotificationOnPebble("HA Dashboard", message);
+  }
 }
 
 function scheduleHaReconnect() {
@@ -206,13 +369,11 @@ function scheduleHaReconnect() {
 // either is silently ignored.
 // item.hide_when must be "none"/"on"/"off" (see parse_hide_when()).
 // item.style must be "raw"/"bar" (see parse_channel_style()).
-function sendHaChannelToWatch(item) {
-  var channelNum = Number(item.channel);
-  if (!(channelNum >= 1 && channelNum <= NUM_HA_CHANNELS)) {
-    console.log("Ignoring HA update for unknown channel: " + item.channel);
-    return;
-  }
-
+//
+// Pulled out of sendHaChannelToWatch() below so the per-channel throttle can
+// build the dict lazily, from whichever item (leading or coalesced-pending)
+// is actually being relayed at the time.
+function buildHaChannelDict(item, channelNum) {
   var dict = {};
   // See haChannelKindCache above: fall back to the last-known kind for
   // this channel when this message omits it, rather than assuming "text".
@@ -256,16 +417,70 @@ function sendHaChannelToWatch(item) {
   if (item.label_color !== undefined && item.label_color !== null) {
     dict["HA" + channelNum + "_LABEL_COLOR"] = String(item.label_color).substring(0, 7);
   }
+  return dict;
+}
 
-  Pebble.sendAppMessage(
-    dict,
-    function () {
-      console.log("Sent HA channel " + channelNum + " to watch");
-    },
-    function (err) {
-      console.log("Failed to send HA channel " + channelNum + ": " + JSON.stringify(err));
+// Every AppMessage transaction wakes the watch's Bluetooth radio — a chatty
+// HA entity (a power meter, a temperature sensor updating every second or
+// two) relayed with no throttling here would keep that radio from ever
+// sleeping and drain the watch battery fast, since nothing on the HA side
+// or in HA_INTEGRATION_SPEC.md promises a minimum update interval.
+//
+// Leading-edge/trailing-edge throttle, independent per channel: the first
+// update to a quiet channel relays immediately (so the watch face still
+// feels live), then a HA_CHANNEL_THROTTLE_MS window opens during which
+// further updates to that same channel are coalesced — only the latest is
+// kept — and relayed once more, at the window's end, if anything arrived.
+// A single slow-but-steady channel is therefore unaffected (each update
+// lands after the previous window closes and relays immediately again); a
+// channel updating many times per second collapses to at most one
+// AppMessage every HA_CHANNEL_THROTTLE_MS instead of one per event.
+var HA_CHANNEL_THROTTLE_MS = 5000;
+var haChannelThrottleTimer = {}; // channelNum -> timer while a window is open
+var haChannelPendingItem = {}; // channelNum -> latest item queued during an open window
+
+// Sticky per-channel dedupe cache: the exact dict (JSON-serialized) last
+// actually relayed for this channel. Some HA integrations re-announce
+// unchanged state; relaying that again would cost another AppMessage/BT
+// wake for no visible change. Deliberately NOT reset on reconnect, same
+// reasoning as haChannelKindCache above — HA resending identical state
+// after a reconnect doesn't need re-relaying either.
+var haChannelLastSentDict = {};
+
+function relayHaChannelDict(channelNum, dict) {
+  var key = JSON.stringify(dict);
+  if (haChannelLastSentDict[channelNum] === key) {
+    return; // identical to what's already on the watch; not worth a BT wake
+  }
+  haChannelLastSentDict[channelNum] = key;
+  sendAppMessageWithRetry(dict, "HA channel " + channelNum, function () {
+    console.log("Sent HA channel " + channelNum + " to watch");
+  });
+}
+
+function sendHaChannelToWatch(item) {
+  var channelNum = Number(item.channel);
+  if (!(channelNum >= 1 && channelNum <= NUM_HA_CHANNELS)) {
+    console.log("Ignoring HA update for unknown channel: " + item.channel);
+    return;
+  }
+
+  if (haChannelThrottleTimer[channelNum]) {
+    // A window is already open for this channel — remember the latest item
+    // and let the window's trailing edge relay it, rather than sending now.
+    haChannelPendingItem[channelNum] = item;
+    return;
+  }
+
+  relayHaChannelDict(channelNum, buildHaChannelDict(item, channelNum));
+  haChannelThrottleTimer[channelNum] = setTimeout(function () {
+    haChannelThrottleTimer[channelNum] = null;
+    var pending = haChannelPendingItem[channelNum];
+    haChannelPendingItem[channelNum] = null;
+    if (pending) {
+      relayHaChannelDict(channelNum, buildHaChannelDict(pending, channelNum));
     }
-  );
+  }, HA_CHANNEL_THROTTLE_MS);
 }
 
 function reportStatusToHomeAssistant(payload) {
@@ -299,17 +514,23 @@ Pebble.addEventListener("appmessage", function (e) {
 
 function connectToHomeAssistant() {
   var config = getHaConfig();
+
+  // Tear down any existing connection unconditionally, even if the new
+  // config turns out to be unset below — otherwise clearing HA_URL/HA_TOKEN
+  // in Clay would silently leave a stale connection (from the previous
+  // config) running in the background instead of actually disconnecting.
+  if (haSocket) {
+    haSocket.onclose = null; // this socket is being replaced, not lost
+    haSocket.close();
+    haSocket = null;
+  }
+  haSubscriptionId = null;
+  haAuthenticated = false;
+
   if (!config.url || !config.token) {
     console.log("Home Assistant not configured yet; not connecting");
     return;
   }
-
-  if (haSocket) {
-    haSocket.onclose = null; // this socket is being replaced, not lost
-    haSocket.close();
-  }
-  haSubscriptionId = null;
-  haAuthenticated = false;
   // haChannelKindCache is deliberately NOT reset here — HA is expected to
   // resend full current state (including kind) via the initial `result`
   // after reconnect anyway, and keeping stale cached state around is
@@ -341,6 +562,7 @@ function connectToHomeAssistant() {
       haSocket.send(JSON.stringify({ id: haSubscriptionId, type: HA_SUBSCRIBE_COMMAND }));
     } else if (message.type === "auth_invalid") {
       console.log("Home Assistant auth failed: " + message.message);
+      notifyHaConnectionFailure("Home Assistant login failed. Check HA_TOKEN in the watchapp settings.");
     } else if (message.id === haSubscriptionId && message.type === "result") {
       if (!message.success) {
         // Most likely cause: the HA-side integration isn't installed, so
@@ -365,6 +587,12 @@ function connectToHomeAssistant() {
 
   haSocket.onclose = function () {
     console.log("Home Assistant socket closed");
+    if (!haAuthenticated) {
+      // Never got as far as auth_ok this attempt — most likely an
+      // unreachable/misconfigured HA_URL (auth_invalid, handled above,
+      // already covers a reachable host that rejected the token).
+      notifyHaConnectionFailure("Couldn't connect to Home Assistant. Check HA_URL in the watchapp settings.");
+    }
     haAuthenticated = false;
     scheduleHaReconnect();
   };

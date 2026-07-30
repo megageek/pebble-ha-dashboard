@@ -45,6 +45,7 @@ function freshEnv() {
   var sentAppMessages = [];
   var scheduledTimeouts = [];
   var lastSocket = null;
+  var notifications = [];
 
   global.localStorage = {
     store: {
@@ -81,6 +82,9 @@ function freshEnv() {
       sentAppMessages.push(dict);
       if (onSuccess) onSuccess();
     },
+    showSimpleNotificationOnPebble: function (title, body) {
+      notifications.push({ title: title, body: body });
+    },
   };
 
   function MockWebSocket(url) {
@@ -91,13 +95,19 @@ function freshEnv() {
   MockWebSocket.prototype.send = function (data) {
     this.sent.push(JSON.parse(data));
   };
-  MockWebSocket.prototype.close = function () {};
+  MockWebSocket.prototype.close = function () {
+    this.closed = true;
+  };
   global.WebSocket = MockWebSocket;
 
   global.setTimeout = function (cb, delay) {
-    var id = scheduledTimeouts.length;
-    scheduledTimeouts.push({ cb: cb, delay: delay });
-    return id;
+    var timer = { cb: cb, delay: delay };
+    scheduledTimeouts.push(timer);
+    return timer;
+  };
+  global.clearTimeout = function (timer) {
+    var index = scheduledTimeouts.indexOf(timer);
+    if (index !== -1) scheduledTimeouts.splice(index, 1);
   };
 
   // Each test needs its own copy of the bridge's module-level state
@@ -174,6 +184,7 @@ function freshEnv() {
     sendAppMessageFromWatch: sendAppMessageFromWatch,
     sentAppMessages: sentAppMessages,
     scheduledTimeouts: scheduledTimeouts,
+    notifications: notifications,
     getLastSocket: function () {
       return lastSocket;
     },
@@ -472,8 +483,16 @@ function freshEnv() {
   env.authenticate();
 
   env.sendChannelEvent({ channel: 1, value: 21, kind: "numeric" });
+  // Arrives while channel 1's throttle window is still open (see the
+  // per-channel throttle in sendHaChannelToWatch) — coalesced, not sent yet.
   env.sendChannelEvent({ channel: 1, value: 22 }); // no kind this time
+  assert(env.sentAppMessages.length === 1, "the second update is coalesced, not sent immediately");
 
+  var throttleTimer = env.scheduledTimeouts.filter(function (t) { return t.delay === 5000; })[0];
+  assert(throttleTimer, "a throttle window is open for channel 1");
+  throttleTimer.cb(); // trailing edge: relays the latest coalesced item
+
+  assert(env.sentAppMessages.length === 2, "the trailing edge relays the coalesced update, got " + env.sentAppMessages.length);
   var msg = env.sentAppMessages[env.sentAppMessages.length - 1];
   assert(
     msg.HA1_VALUE === 22 && typeof msg.HA1_VALUE === "number",
@@ -481,6 +500,58 @@ function freshEnv() {
       JSON.stringify(msg.HA1_VALUE) + " (" + typeof msg.HA1_VALUE + ")"
   );
   assert(!("HA1_KIND" in msg), "kind key omitted on the value-only follow-up, got " + JSON.stringify(msg));
+})();
+
+// --- Test 7d-4: a burst of rapid updates to the same channel coalesces to
+// exactly 2 AppMessages (leading edge + trailing edge with the latest
+// value), not one per event — this is the actual battery fix: an HA entity
+// updating many times within the throttle window must not wake the watch's
+// Bluetooth radio once per event ---
+(function testChannelBurstCoalescesToTrailingEdge() {
+  var env = freshEnv();
+  env.authenticate();
+
+  env.sendChannelEvent({ channel: 1, value: 20 });
+  env.sendChannelEvent({ channel: 1, value: 21 });
+  env.sendChannelEvent({ channel: 1, value: 22 });
+  env.sendChannelEvent({ channel: 1, value: 23 });
+
+  assert(env.sentAppMessages.length === 1, "only the leading-edge update is sent immediately, got " + env.sentAppMessages.length);
+
+  var throttleTimer = env.scheduledTimeouts.filter(function (t) { return t.delay === 5000; })[0];
+  throttleTimer.cb();
+
+  assert(env.sentAppMessages.length === 2, "the burst coalesces to exactly 2 AppMessages total, got " + env.sentAppMessages.length);
+  assert(
+    env.sentAppMessages[0].HA1_VALUE === "20" && env.sentAppMessages[1].HA1_VALUE === "23",
+    "leading edge carries the first value and trailing edge carries the latest, got " +
+      JSON.stringify([env.sentAppMessages[0].HA1_VALUE, env.sentAppMessages[1].HA1_VALUE])
+  );
+})();
+
+// --- Test 7d-5: after a throttle window closes, a channel re-announcing
+// the exact same state it last relayed is deduped rather than resent ---
+(function testIdenticalRepeatIsDeduped() {
+  var env = freshEnv();
+  env.authenticate();
+
+  env.sendChannelEvent({ channel: 1, value: "72F", label: "Temp" });
+  assert(env.sentAppMessages.length === 1, "first update relays");
+
+  var throttleTimer = env.scheduledTimeouts.filter(function (t) { return t.delay === 5000; })[0];
+  throttleTimer.cb(); // close the window with nothing pending
+
+  env.sendChannelEvent({ channel: 1, value: "72F", label: "Temp" }); // identical repeat
+  assert(env.sentAppMessages.length === 1, "identical repeat is deduped, not resent, got " + env.sentAppMessages.length);
+
+  // The deduped repeat still opened its own throttle window (see
+  // sendHaChannelToWatch — leading-edge processing always opens one,
+  // whether or not the dedupe check actually sent anything); close it
+  // before sending a genuine change so that change gets its own leading edge.
+  env.scheduledTimeouts.filter(function (t) { return t.delay === 5000; }).forEach(function (t) { t.cb(); });
+
+  env.sendChannelEvent({ channel: 1, value: "73F", label: "Temp" }); // an actual change
+  assert(env.sentAppMessages.length === 2, "a genuine change after a deduped repeat still relays, got " + env.sentAppMessages.length);
 })();
 
 // --- Test 7d-3: the sticky-kind cache is per-channel — a value-only
@@ -561,6 +632,174 @@ function freshEnv() {
   );
 })();
 
+// --- Test 8b: auth_invalid (bad HA_TOKEN) shows exactly one watch
+// notification, not one per automatic reconnect retry ---
+(function testAuthInvalidNotifiesOnce() {
+  var env = freshEnv();
+  env.fire("ready");
+  var socket1 = env.getLastSocket();
+  socket1.onmessage({ data: JSON.stringify({ type: "auth_required" }) });
+  socket1.onmessage({ data: JSON.stringify({ type: "auth_invalid", message: "Invalid access token" }) });
+  socket1.onclose();
+
+  assert(env.notifications.length === 1, "auth_invalid shows exactly one watch notification, got " + env.notifications.length);
+  assert(
+    /login failed/i.test(env.notifications[0].body),
+    "notification message mentions login failure, got " + JSON.stringify(env.notifications[0])
+  );
+
+  // Automatic reconnect retries with the same bad token must not repeat it.
+  env.scheduledTimeouts[0].cb();
+  var socket2 = env.getLastSocket();
+  socket2.onmessage({ data: JSON.stringify({ type: "auth_required" }) });
+  socket2.onmessage({ data: JSON.stringify({ type: "auth_invalid", message: "Invalid access token" }) });
+  socket2.onclose();
+
+  assert(env.notifications.length === 1, "repeated auth_invalid on auto-reconnect does not spam a second notification");
+})();
+
+// --- Test 8c: a connection that never reaches auth_ok (bad/unreachable
+// HA_URL) also shows one generic notification, same suppression rule ---
+(function testUnreachableHostNotifiesGeneric() {
+  var env = freshEnv();
+  env.fire("ready");
+  env.getLastSocket().onclose(); // dropped before auth_required/auth_ok ever arrived
+
+  assert(env.notifications.length === 1, "a connection that never authenticates shows one notification, got " + env.notifications.length);
+  assert(
+    /couldn't connect|could not connect/i.test(env.notifications[0].body),
+    "generic connection-failure message, got " + JSON.stringify(env.notifications[0])
+  );
+
+  env.scheduledTimeouts[0].cb();
+  env.getLastSocket().onclose();
+  assert(env.notifications.length === 1, "repeated failure on auto-reconnect does not spam a second notification");
+})();
+
+// --- Test 8d: a Clay config save is a fresh user-initiated attempt, so a
+// failure notifies again even if the previous URL/token already did ---
+(function testNotificationResetsAfterConfigSave() {
+  var env = freshEnv();
+  env.fire("ready");
+  env.getLastSocket().onclose();
+  assert(env.notifications.length === 1, "first failure notifies");
+
+  env.fire(
+    "webviewclosed",
+    { response: JSON.stringify({ HA_URL: "http://still-bad.local:8123", HA_TOKEN: "t" }) }
+  );
+  env.getLastSocket().onclose();
+  assert(env.notifications.length === 2, "a fresh failure after a config save notifies again, got " + env.notifications.length);
+})();
+
+// --- Test 8e: a normal drop after a successful connection does not
+// spuriously fire the generic failure notification ---
+(function testSuccessfulDropDoesNotNotify() {
+  var env = freshEnv();
+  env.authenticate();
+  env.getLastSocket().onclose();
+
+  assert(env.notifications.length === 0, "dropping an already-authenticated connection notifies nothing, got " + env.notifications.length);
+})();
+
+// --- Test 8e-2: clearing HA_URL/HA_TOKEN via a config save actually closes
+// the previously-open socket instead of leaving it running in the
+// background — regression test for a bug where connectToHomeAssistant()'s
+// early return (config unset) skipped tearing down the old connection ---
+(function testClearingConfigClosesExistingSocket() {
+  var env = freshEnv();
+  env.authenticate();
+  var oldSocket = env.getLastSocket();
+
+  env.fire("webviewclosed", { response: JSON.stringify({ HA_URL: "", HA_TOKEN: "" }) });
+
+  assert(oldSocket.closed === true, "the previously-open socket is closed when config is cleared");
+  assert(env.getLastSocket() === oldSocket, "no new socket is opened for an unset config");
+})();
+
+// --- Test 8f: a failed AppMessage send (e.g. the phone's own Bluetooth
+// session still warming up right after the Pebble app restarts) is
+// retried after a delay instead of being dropped forever, and succeeds
+// once the retry goes through ---
+(function testFailedSendRetriesAndSucceeds() {
+  var env = freshEnv();
+  env.authenticate();
+
+  var attempts = 0;
+  var delivered = null;
+  global.Pebble.sendAppMessage = function (dict, onSuccess, onError) {
+    attempts++;
+    if (attempts === 1) {
+      onError({ error: "Failed to connect to Pebble" });
+    } else {
+      delivered = dict;
+      onSuccess();
+    }
+  };
+
+  env.sendChannelEvent({ channel: 1, value: "72F", label: "Temp" });
+
+  assert(attempts === 1, "first attempt happens immediately, got " + attempts);
+  // Two timers are live at this point: the 3000ms send retry, and the
+  // 5000ms per-channel throttle window opened by the leading-edge relay
+  // attempt (see sendHaChannelToWatch's throttle in src/pkjs/index.js).
+  var retryTimer = env.scheduledTimeouts.filter(function (t) { return t.delay === 3000; })[0];
+  assert(retryTimer, "a retry is scheduled after a failed send, got delays " + env.scheduledTimeouts.map(function (t) { return t.delay; }));
+
+  retryTimer.cb();
+
+  assert(attempts === 2, "retry actually re-attempts the send, got " + attempts);
+  assert(
+    delivered && delivered.HA1_VALUE === "72F",
+    "the retried send delivers the original data, got " + JSON.stringify(delivered)
+  );
+})();
+
+// --- Test 8g: an AppMessage send that keeps failing gives up after a
+// bounded number of attempts instead of retrying forever ---
+(function testFailedSendGivesUpAfterMaxAttempts() {
+  var env = freshEnv();
+  env.authenticate();
+
+  var attempts = 0;
+  global.Pebble.sendAppMessage = function (dict, onSuccess, onError) {
+    attempts++;
+    onError({ error: "Failed to connect to Pebble" });
+  };
+
+  env.sendChannelEvent({ channel: 1, value: "72F" });
+  while (env.scheduledTimeouts.length > 0) {
+    env.scheduledTimeouts.shift().cb();
+  }
+
+  assert(attempts === 5, "gives up after 5 total attempts, got " + attempts);
+  assert(env.scheduledTimeouts.length === 0, "no further retry scheduled after the last attempt");
+})();
+
+// --- Test 8h: an HA snapshot is globally serialized; forEach must not
+// create concurrent PebbleKit AppMessage transactions. ---
+(function testHaSnapshotUsesSingleFlightQueue() {
+  var env = freshEnv();
+  env.authenticate();
+  var sends = [];
+  var callbacks = [];
+  global.Pebble.sendAppMessage = function (dict, onSuccess) {
+    sends.push(dict);
+    callbacks.push(onSuccess);
+  };
+
+  env.sendInitialResult([
+    { channel: 1, value: "one" },
+    { channel: 2, value: "two" },
+    { channel: 3, value: "three" },
+  ]);
+  assert(sends.length === 1, "HA snapshot starts only one AppMessage before its ack, got " + sends.length);
+  callbacks[0]();
+  assert(sends.length === 2, "first ack releases exactly the second HA update, got " + sends.length);
+  callbacks[1]();
+  assert(sends.length === 3, "second ack releases exactly the third HA update, got " + sends.length);
+})();
+
 // --- Test 9: webviewclosed filters HA_URL/HA_TOKEN out of the AppMessage
 // sent to the watch, but still reconnects using the new values ---
 (function testWebviewClosedFiltersAndReconnects() {
@@ -589,6 +828,11 @@ function freshEnv() {
 
   env.fire("webviewclosed", { response: claySavePayload });
 
+  // Dispatched synchronously, inside webviewclosed itself — matching a
+  // known-working reference watchface (peerdavid/pebble-mesh), which sends
+  // its own config the same way with no defer. An earlier setTimeout-based
+  // defer (0ms, then 3000ms) was real-device-tested and made no difference;
+  // every config save still failed outright regardless of the delay.
   assert(env.sentAppMessages.length === 1, "config save sent exactly one AppMessage to the watch");
   var watchMsg = env.sentAppMessages[0];
   assert(watchMsg.TEMPLATE_INDEX === 1, "TEMPLATE_INDEX forwarded to the watch, got " + JSON.stringify(watchMsg));
@@ -609,6 +853,205 @@ function freshEnv() {
   assert(
     secondSocket !== firstSocket && secondSocket.url === "http://new-ha.local:8123/api/websocket",
     "webviewclosed reconnected using the newly saved URL, got " + secondSocket.url
+  );
+})();
+
+// --- Test 9a-2: Clay's "select" component always returns its value as a JS
+// string (an HTML <option value="..."> is inherently string-typed) — real
+// Clay saves never send TEMPLATE_INDEX/SLOT_n_CHANNEL/DOT_* as JS numbers,
+// even though config.js declares their option values as numbers. main.c
+// reads these fields with dict_find(...)->value->int32 with no type check,
+// so a string-typed tuple there produces garbage, not the intended number.
+// This is a real bug found via real-device testing (a known-working
+// reference watchface, peerdavid/pebble-mesh, explicitly parseInt()s every
+// one of its own numeric select values before sending) — this test uses
+// string values for these fields, matching Clay's actual behavior, unlike
+// every other test above which builds its fake e.response with JS number
+// literals and would never have caught this. ---
+(function testNumericSelectValuesCoercedFromClayStrings() {
+  var env = freshEnv();
+  env.fire("ready");
+
+  // Matches exactly what Clay's real getSettings(e.response, false) returns
+  // for select components: every value is a string, regardless of how
+  // config.js declared the option's `value`.
+  var claySavePayload = JSON.stringify({
+    TEMPLATE_INDEX: "1",
+    SLOT_0_CHANNEL: "4",
+    DOT_GROUP_SLOT: "2",
+    DOT_0_CHANNEL: "7",
+    DOT_SIZE: "0",
+    CHARGE_ON_COLOR: "red", // color/hide-when selects are also strings, but must STAY strings
+  });
+
+  env.fire("webviewclosed", { response: claySavePayload });
+
+  var watchMsg = env.sentAppMessages[0];
+  assert(
+    watchMsg.TEMPLATE_INDEX === 1 && typeof watchMsg.TEMPLATE_INDEX === "number",
+    "TEMPLATE_INDEX coerced from Clay's string to a real number, got " +
+      JSON.stringify(watchMsg.TEMPLATE_INDEX) + " (" + typeof watchMsg.TEMPLATE_INDEX + ")"
+  );
+  assert(
+    watchMsg.SLOT_0_CHANNEL === 4 && typeof watchMsg.SLOT_0_CHANNEL === "number",
+    "SLOT_0_CHANNEL coerced to a real number, got " + JSON.stringify(watchMsg.SLOT_0_CHANNEL)
+  );
+  assert(
+    watchMsg.DOT_GROUP_SLOT === 2 && watchMsg.DOT_0_CHANNEL === 7 && watchMsg.DOT_SIZE === 0,
+    "DOT_GROUP_SLOT/DOT_0_CHANNEL/DOT_SIZE all coerced to real numbers, got " +
+      JSON.stringify({ slot: watchMsg.DOT_GROUP_SLOT, ch: watchMsg.DOT_0_CHANNEL, size: watchMsg.DOT_SIZE })
+  );
+  assert(
+    watchMsg.CHARGE_ON_COLOR === "red" && typeof watchMsg.CHARGE_ON_COLOR === "string",
+    "CHARGE_ON_COLOR (a color select) is left as a string, not coerced, got " +
+      JSON.stringify(watchMsg.CHARGE_ON_COLOR) + " (" + typeof watchMsg.CHARGE_ON_COLOR + ")"
+  );
+})();
+
+// --- Test 9b: a full-size config save (all 69 WATCH_SETTINGS_KEYS, as a
+// real Clay save produces) is split into multiple sequential AppMessages
+// instead of one giant dictionary — the real bug this guards against: a
+// single 69-key send failed immediately on a real phone and wedged the
+// AppMessage session for every subsequent send (see sendWatchSettings()'s
+// comment in src/pkjs/index.js). Each chunk must wait for the previous
+// chunk's ack before the next one goes out, not fire all at once. ---
+(function testLargeConfigSplitIntoSequentialChunks() {
+  var env = freshEnv();
+  env.fire("ready");
+
+  var sentChunks = [];
+  var pendingCallbacks = [];
+  // Override the default auto-acking mock for this test only, so chunk N+1
+  // can be proven not to send until chunk N's callback is manually fired.
+  global.Pebble.sendAppMessage = function (dict, onSuccess) {
+    sentChunks.push(dict);
+    pendingCallbacks.push(onSuccess);
+  };
+
+  var fullSettings = {
+    TEMPLATE_INDEX: 1,
+    REPORT_ENABLE_BATTERY: true,
+    HA_URL: "http://ha.local:8123", // must still be withheld from the watch
+    HA_TOKEN: "testtoken",
+  };
+  for (var i = 0; i < 10; i++) {
+    fullSettings["SLOT_" + i + "_CHANNEL"] = i;
+  }
+  for (var j = 0; j < 4; j++) {
+    fullSettings["DOT_" + j + "_CHANNEL"] = j;
+  }
+
+  env.fire("webviewclosed", { response: JSON.stringify(fullSettings) });
+
+  var expectedKeyCount = Object.keys(fullSettings).length - 2; // minus HA_URL/HA_TOKEN
+  var expectedChunkCount = Math.ceil(expectedKeyCount / 15);
+  assert(expectedChunkCount > 1, "a config this size actually needs more than one chunk (test setup sanity check)");
+
+  // Only the first chunk should have been sent so far — later chunks must
+  // wait for earlier ones' acks, not fire all at once synchronously.
+  assert(sentChunks.length === 1, "only the first chunk is sent before any ack, got " + sentChunks.length);
+
+  // Resolve acks one at a time; each must release exactly one more chunk.
+  var i2 = 0;
+  while (i2 < pendingCallbacks.length) {
+    var before = sentChunks.length;
+    pendingCallbacks[i2]();
+    i2++;
+    var after = sentChunks.length;
+    assert(after - before <= 1, "resolving one chunk's ack sends at most one more chunk, got " + (after - before) + " new");
+  }
+
+  assert(
+    sentChunks.length === expectedChunkCount,
+    "split into ceil(" + expectedKeyCount + "/15) = " + expectedChunkCount + " chunks total, got " + sentChunks.length
+  );
+  sentChunks.forEach(function (chunk, idx) {
+    assert(Object.keys(chunk).length <= 15, "chunk " + idx + " has at most 15 keys, got " + Object.keys(chunk).length);
+  });
+
+  var allKeys = {};
+  sentChunks.forEach(function (chunk) {
+    Object.keys(chunk).forEach(function (k) {
+      assert(!(k in allKeys), "key " + k + " sent in exactly one chunk, not duplicated across chunks");
+      allKeys[k] = chunk[k];
+    });
+  });
+  assert(!("HA_URL" in allKeys) && !("HA_TOKEN" in allKeys), "HA_URL/HA_TOKEN withheld across all chunks");
+  assert(
+    Object.keys(allKeys).length === expectedKeyCount,
+    "all " + expectedKeyCount + " forwarded keys eventually delivered across chunks, got " + Object.keys(allKeys).length
+  );
+})();
+
+// --- Test 9c: the HA WebSocket reconnect triggered by a config save must
+// not start until config delivery has fully settled (succeeded, or given up
+// after exhausting retries) — a config save is the only moment this app
+// does an AppMessage burst (chunks) and a WebSocket reconnect (its own
+// auth round trips, plus the initial channel snapshot relaying as more
+// AppMessages through the same queue) at once; real-device testing showed
+// config saves reliably failing while isolated sends worked fine, and
+// sequencing these removes the overlap as a suspect. ---
+(function testHaReconnectWaitsForConfigDeliveryToSettle() {
+  var env = freshEnv();
+  env.fire("ready");
+  var firstSocket = env.getLastSocket();
+
+  var attempts = 0;
+  global.Pebble.sendAppMessage = function (dict, onSuccess, onError) {
+    attempts++;
+    onError({ error: "Failed to connect to Pebble" });
+  };
+
+  env.fire(
+    "webviewclosed",
+    { response: JSON.stringify({ TEMPLATE_INDEX: 1, HA_URL: "http://ha.local:8123", HA_TOKEN: "testtoken" }) }
+  );
+
+  assert(attempts === 1, "first send attempt happens immediately, got " + attempts);
+  assert(
+    env.getLastSocket() === firstSocket,
+    "HA reconnect has not started while config delivery is still retrying"
+  );
+
+  // Drive every retry by always firing the most recently scheduled timer —
+  // each failed attempt schedules exactly one new retry, until the final
+  // (5th) attempt, which gives up instead.
+  while (attempts < 5) {
+    env.scheduledTimeouts[env.scheduledTimeouts.length - 1].cb();
+  }
+
+  assert(attempts === 5, "config chunk exhausted all 5 attempts, got " + attempts);
+  assert(
+    env.getLastSocket() !== firstSocket,
+    "HA reconnect starts once config delivery has settled, even having given up"
+  );
+})();
+
+// --- Test 9d: when config delivery succeeds normally (no retries needed),
+// the HA reconnect still only starts after it settles, not concurrently ---
+(function testHaReconnectWaitsForSuccessfulConfigDelivery() {
+  var env = freshEnv();
+  env.fire("ready");
+  var firstSocket = env.getLastSocket();
+
+  var sendOrder = [];
+  global.Pebble.sendAppMessage = function (dict, onSuccess) {
+    sendOrder.push("appmessage:" + Object.keys(dict).join(","));
+    onSuccess();
+  };
+
+  env.fire(
+    "webviewclosed",
+    { response: JSON.stringify({ TEMPLATE_INDEX: 1, HA_URL: "http://ha.local:8123", HA_TOKEN: "testtoken" }) }
+  );
+
+  assert(
+    env.getLastSocket() !== firstSocket,
+    "HA reconnect starts immediately after a config chunk that succeeds with no retries needed"
+  );
+  assert(
+    sendOrder.length === 1 && sendOrder[0].indexOf("TEMPLATE_INDEX") !== -1,
+    "the config AppMessage was actually sent before the reconnect, got " + JSON.stringify(sendOrder)
   );
 })();
 

@@ -7,11 +7,19 @@
 // to HA over the same WebSocket connection used to receive channel data
 // (see HA_INTEGRATION_SPEC.md). Every metric here is read from a service the
 // watchface already touches for its own display (battery, steps) or is a
-// cheap additional read at the same MINUTE_UNIT cadence — nothing here adds
-// a new wake-up source or extra battery cost. Heart rate deliberately reads
-// whatever the system's own default background sampling already produced
+// cheap additional read — nothing here adds a new wake-up source or extra
+// battery cost. Heart rate deliberately reads whatever the system's own
+// default background sampling already produced
 // (health_service_peek_current_value()) rather than requesting an elevated
 // sample rate, so it's exactly as cheap as everything else here.
+//
+// The periodic report (as opposed to the immediate one on a battery
+// charge-state change) is only attempted every STATUS_REPORT_INTERVAL_MINUTES
+// wall-clock minutes, not every MINUTE_UNIT tick — see tick_handler() in
+// channel_updates.c. Steps/activity/heart rate drift almost every minute
+// while the watch is worn, which defeated send_status_report()'s own
+// change-detection dedup below when checked that often; 5 minutes is a
+// cadence HA doesn't need finer than, per the user.
 //
 // Each measure belongs to a ReportGroup the user can disable via Clay
 // config; disabling one doesn't just stop sending its fields — every
@@ -20,6 +28,8 @@
 // hardware" (field simply absent) apart from "user turned this off"
 // (group named in REPORT_DISABLED) and remove/deactivate the right
 // entities accordingly.
+
+#define STATUS_REPORT_INTERVAL_MINUTES 5
 
 // All enabled by default; persisted overrides loaded by
 // config_message.c's load_config().

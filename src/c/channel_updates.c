@@ -91,5 +91,18 @@ void tick_handler(struct tm *tick_time, TimeUnits units_changed) {
     update_time();
     update_steps();
     update_health_channels();
-    send_status_report();
+
+    // The on-watch channels above still refresh every minute (cheap, and
+    // the whole point of a watch face), but the HA-bound status report is
+    // only attempted on 5-minute wall-clock boundaries — steps/heart
+    // rate/activity change almost every single minute while the watch is
+    // actively worn, which defeated send_status_report()'s own
+    // change-detection dedup (see health_report.c) and meant a real
+    // AppMessage/BLE wake every minute anyway. Battery charge-state
+    // changes still report immediately via battery_callback(), since
+    // those are discrete events worth surfacing promptly rather than
+    // values that drift continuously.
+    if (tick_time->tm_min % STATUS_REPORT_INTERVAL_MINUTES == 0) {
+        send_status_report();
+    }
 }

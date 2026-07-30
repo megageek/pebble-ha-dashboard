@@ -138,7 +138,13 @@ typedef enum {
     REPORT_GROUP_ACTIVITY,     // active seconds, distance, active + resting kcal
     REPORT_GROUP_SLEEP,        // sleep seconds, restful sleep seconds
     REPORT_GROUP_HEART_RATE,
-    REPORT_GROUP_CONNECTED,
+    // REPORT_GROUP_CONNECTED removed — a "connected" field was close to
+    // tautological (if the watch couldn't reach the phone, the report
+    // carrying that field wouldn't have arrived either) and carried no
+    // real information HA didn't already have from the report's own
+    // arrival. Not preserved as a gap: this project has no published
+    // installs yet, so there's no persisted PERSIST_KEY_REPORT_ENABLED_BASE
+    // state to stay compatible with.
     REPORT_GROUP_DEVICE_INFO,  // model, firmware, color (sent once at startup)
     NUM_REPORT_GROUPS,
 } ReportGroup;

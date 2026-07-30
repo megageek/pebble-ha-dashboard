@@ -2,82 +2,96 @@
 #include <stdio.h>
 
 static const char *const REPORT_GROUP_NAMES[NUM_REPORT_GROUPS] = {
-    "battery", "steps", "activity", "sleep", "heart_rate", "connected", "device_info",
+    "battery", "steps", "activity", "sleep", "heart_rate", "device_info",
 };
 
 bool s_report_enabled[NUM_REPORT_GROUPS] = {
-    true, true, true, true, true, true, true,
+    true, true, true, true, true, true,
 };
 
-static void write_health_metric_if_available(DictionaryIterator *iter, uint32_t key,
-                                              HealthMetric metric, time_t start, time_t end) {
-    HealthServiceAccessibilityMask mask = health_service_metric_accessible(metric, start, end);
-    if (mask & HealthServiceAccessibilityMaskAvailable) {
-        HealthValue value = health_service_sum(metric, start, end);
-        dict_write_int32(iter, key, (int32_t)value);
-    }
-}
+// Every field this report can carry, plus whether each optional one is
+// actually present this time (a metric can flip between accessible/
+// inaccessible, and that transition itself is a real change worth
+// sending). Compared field-by-field against the previous send below so an
+// unchanged report costs nothing — HA keeps an entity's last value until a
+// new one arrives, so re-sending identical data every single minute, all
+// day, wakes the Bluetooth radio for no informational gain.
+typedef struct {
+    bool populated;  // false only before the very first report
+    bool battery_present;
+    int32_t battery_percent;
+    bool battery_charging;
+    bool steps_present;
+    int32_t steps;
+    bool activity_present;
+    int32_t active_seconds;
+    int32_t distance_meters;
+    int32_t active_kcal;
+    int32_t resting_kcal;
+    bool sleep_present;
+    int32_t sleep_seconds;
+    int32_t sleep_restful_seconds;
+    bool heart_rate_present;
+    int32_t heart_rate_bpm;
+    char disabled[80];
+} StatusReportSnapshot;
 
-// Comma-joins the names of every currently-disabled group so HA can tell
-// "user turned this off" apart from "not accessible on this hardware" (the
-// latter is just a field that's silently absent, same as it always was).
-static void write_disabled_groups(DictionaryIterator *iter) {
-    char buffer[80];
-    buffer[0] = '\0';
-    bool any = false;
+static StatusReportSnapshot s_last_report;
 
-    for (int i = 0; i < NUM_REPORT_GROUPS; i++) {
-        if (s_report_enabled[i]) {
-            continue;
-        }
-        if (any) {
-            strncat(buffer, ",", sizeof(buffer) - strlen(buffer) - 1);
-        }
-        strncat(buffer, REPORT_GROUP_NAMES[i], sizeof(buffer) - strlen(buffer) - 1);
-        any = true;
-    }
-
-    if (any) {
-        dict_write_cstring(iter, MESSAGE_KEY_REPORT_DISABLED, buffer);
-    }
+static bool snapshot_equal(const StatusReportSnapshot *a, const StatusReportSnapshot *b) {
+    return a->battery_present == b->battery_present
+        && (!a->battery_present || (a->battery_percent == b->battery_percent && a->battery_charging == b->battery_charging))
+        && a->steps_present == b->steps_present
+        && (!a->steps_present || a->steps == b->steps)
+        && a->activity_present == b->activity_present
+        && (!a->activity_present || (a->active_seconds == b->active_seconds && a->distance_meters == b->distance_meters
+                                      && a->active_kcal == b->active_kcal && a->resting_kcal == b->resting_kcal))
+        && a->sleep_present == b->sleep_present
+        && (!a->sleep_present || (a->sleep_seconds == b->sleep_seconds && a->sleep_restful_seconds == b->sleep_restful_seconds))
+        && a->heart_rate_present == b->heart_rate_present
+        && (!a->heart_rate_present || a->heart_rate_bpm == b->heart_rate_bpm)
+        && strcmp(a->disabled, b->disabled) == 0;
 }
 
 void send_status_report(void) {
-    DictionaryIterator *iter;
-    AppMessageResult begin_result = app_message_outbox_begin(&iter);
-    if (begin_result != APP_MSG_OK) {
-        APP_LOG(APP_LOG_LEVEL_ERROR, "send_status_report: outbox_begin failed, result=%d", (int)begin_result);
-        return;  // outbox busy; the next periodic call will try again
-    }
+    StatusReportSnapshot snap = { .populated = true };
 
     if (s_report_enabled[REPORT_GROUP_BATTERY]) {
         BatteryChargeState battery = battery_state_service_peek();
-        dict_write_int32(iter, MESSAGE_KEY_REPORT_BATTERY_PERCENT, battery.charge_percent);
-        dict_write_int32(iter, MESSAGE_KEY_REPORT_BATTERY_CHARGING, battery.is_charging ? 1 : 0);
-    }
-
-    if (s_report_enabled[REPORT_GROUP_CONNECTED]) {
-        dict_write_int32(iter, MESSAGE_KEY_REPORT_CONNECTED,
-                          connection_service_peek_pebble_app_connection() ? 1 : 0);
+        snap.battery_present = true;
+        snap.battery_percent = battery.charge_percent;
+        snap.battery_charging = battery.is_charging;
     }
 
     time_t day_start = time_start_of_today();
     time_t now = time(NULL);
 
     if (s_report_enabled[REPORT_GROUP_STEPS]) {
-        write_health_metric_if_available(iter, MESSAGE_KEY_REPORT_STEPS, HealthMetricStepCount, day_start, now);
+        HealthServiceAccessibilityMask mask = health_service_metric_accessible(HealthMetricStepCount, day_start, now);
+        if (mask & HealthServiceAccessibilityMaskAvailable) {
+            snap.steps_present = true;
+            snap.steps = (int32_t)health_service_sum(HealthMetricStepCount, day_start, now);
+        }
     }
 
     if (s_report_enabled[REPORT_GROUP_ACTIVITY]) {
-        write_health_metric_if_available(iter, MESSAGE_KEY_REPORT_ACTIVE_SECONDS, HealthMetricActiveSeconds, day_start, now);
-        write_health_metric_if_available(iter, MESSAGE_KEY_REPORT_DISTANCE_METERS, HealthMetricWalkedDistanceMeters, day_start, now);
-        write_health_metric_if_available(iter, MESSAGE_KEY_REPORT_ACTIVE_KCAL, HealthMetricActiveKCalories, day_start, now);
-        write_health_metric_if_available(iter, MESSAGE_KEY_REPORT_RESTING_KCAL, HealthMetricRestingKCalories, day_start, now);
+        HealthServiceAccessibilityMask mask = health_service_metric_accessible(HealthMetricActiveSeconds, day_start, now);
+        if (mask & HealthServiceAccessibilityMaskAvailable) {
+            snap.activity_present = true;
+            snap.active_seconds = (int32_t)health_service_sum(HealthMetricActiveSeconds, day_start, now);
+            snap.distance_meters = (int32_t)health_service_sum(HealthMetricWalkedDistanceMeters, day_start, now);
+            snap.active_kcal = (int32_t)health_service_sum(HealthMetricActiveKCalories, day_start, now);
+            snap.resting_kcal = (int32_t)health_service_sum(HealthMetricRestingKCalories, day_start, now);
+        }
     }
 
     if (s_report_enabled[REPORT_GROUP_SLEEP]) {
-        write_health_metric_if_available(iter, MESSAGE_KEY_REPORT_SLEEP_SECONDS, HealthMetricSleepSeconds, day_start, now);
-        write_health_metric_if_available(iter, MESSAGE_KEY_REPORT_SLEEP_RESTFUL_SECONDS, HealthMetricSleepRestfulSeconds, day_start, now);
+        HealthServiceAccessibilityMask mask = health_service_metric_accessible(HealthMetricSleepSeconds, day_start, now);
+        if (mask & HealthServiceAccessibilityMaskAvailable) {
+            snap.sleep_present = true;
+            snap.sleep_seconds = (int32_t)health_service_sum(HealthMetricSleepSeconds, day_start, now);
+            snap.sleep_restful_seconds = (int32_t)health_service_sum(HealthMetricSleepRestfulSeconds, day_start, now);
+        }
     }
 
     // Heart rate is an instantaneous reading, not a daily sum — accessibility
@@ -90,15 +104,61 @@ void send_status_report(void) {
     if (s_report_enabled[REPORT_GROUP_HEART_RATE]) {
         HealthServiceAccessibilityMask hr_mask = health_service_metric_accessible(HealthMetricHeartRateBPM, now, now);
         if (hr_mask & HealthServiceAccessibilityMaskAvailable) {
-            HealthValue hr = health_service_peek_current_value(HealthMetricHeartRateBPM);
-            dict_write_int32(iter, MESSAGE_KEY_REPORT_HEART_RATE_BPM, (int32_t)hr);
+            snap.heart_rate_present = true;
+            snap.heart_rate_bpm = (int32_t)health_service_peek_current_value(HealthMetricHeartRateBPM);
         }
     }
 
-    write_disabled_groups(iter);
+    snap.disabled[0] = '\0';
+    for (int i = 0; i < NUM_REPORT_GROUPS; i++) {
+        if (s_report_enabled[i]) {
+            continue;
+        }
+        if (snap.disabled[0] != '\0') {
+            strncat(snap.disabled, ",", sizeof(snap.disabled) - strlen(snap.disabled) - 1);
+        }
+        strncat(snap.disabled, REPORT_GROUP_NAMES[i], sizeof(snap.disabled) - strlen(snap.disabled) - 1);
+    }
+
+    if (s_last_report.populated && snapshot_equal(&snap, &s_last_report)) {
+        APP_LOG(APP_LOG_LEVEL_DEBUG, "send_status_report: unchanged, skipping send");
+        return;
+    }
+
+    DictionaryIterator *iter;
+    AppMessageResult begin_result = app_message_outbox_begin(&iter);
+    if (begin_result != APP_MSG_OK) {
+        APP_LOG(APP_LOG_LEVEL_ERROR, "send_status_report: outbox_begin failed, result=%d", (int)begin_result);
+        return;  // outbox busy; the next periodic call will try again
+    }
+
+    if (snap.battery_present) {
+        dict_write_int32(iter, MESSAGE_KEY_REPORT_BATTERY_PERCENT, snap.battery_percent);
+        dict_write_int32(iter, MESSAGE_KEY_REPORT_BATTERY_CHARGING, snap.battery_charging ? 1 : 0);
+    }
+    if (snap.steps_present) {
+        dict_write_int32(iter, MESSAGE_KEY_REPORT_STEPS, snap.steps);
+    }
+    if (snap.activity_present) {
+        dict_write_int32(iter, MESSAGE_KEY_REPORT_ACTIVE_SECONDS, snap.active_seconds);
+        dict_write_int32(iter, MESSAGE_KEY_REPORT_DISTANCE_METERS, snap.distance_meters);
+        dict_write_int32(iter, MESSAGE_KEY_REPORT_ACTIVE_KCAL, snap.active_kcal);
+        dict_write_int32(iter, MESSAGE_KEY_REPORT_RESTING_KCAL, snap.resting_kcal);
+    }
+    if (snap.sleep_present) {
+        dict_write_int32(iter, MESSAGE_KEY_REPORT_SLEEP_SECONDS, snap.sleep_seconds);
+        dict_write_int32(iter, MESSAGE_KEY_REPORT_SLEEP_RESTFUL_SECONDS, snap.sleep_restful_seconds);
+    }
+    if (snap.heart_rate_present) {
+        dict_write_int32(iter, MESSAGE_KEY_REPORT_HEART_RATE_BPM, snap.heart_rate_bpm);
+    }
+    if (snap.disabled[0] != '\0') {
+        dict_write_cstring(iter, MESSAGE_KEY_REPORT_DISABLED, snap.disabled);
+    }
 
     AppMessageResult send_result = app_message_outbox_send();
     APP_LOG(APP_LOG_LEVEL_DEBUG, "send_status_report: outbox_send result=%d", (int)send_result);
+    s_last_report = snap;
 }
 
 static const char *watch_model_name(void) {
@@ -124,7 +184,7 @@ static const char *watch_color_name(void) {
 
 void send_device_info(void) {
     if (!s_report_enabled[REPORT_GROUP_DEVICE_INFO]) {
-        return;  // its disabled state still surfaces via write_disabled_groups()
+        return;  // its disabled state still surfaces via the `disabled` field send_status_report() builds
     }
 
     DictionaryIterator *iter;

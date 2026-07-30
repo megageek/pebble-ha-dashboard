@@ -25,7 +25,6 @@ var WATCH_SETTINGS_KEYS = [
   "REPORT_ENABLE_ACTIVITY",
   "REPORT_ENABLE_SLEEP",
   "REPORT_ENABLE_HEART_RATE",
-  "REPORT_ENABLE_CONNECTED",
   "REPORT_ENABLE_DEVICE_INFO",
   "DOT_GROUP_SLOT",
   "DOT_0_CHANNEL",
@@ -122,7 +121,6 @@ var BOOLEAN_SETTINGS_KEYS = {
   REPORT_ENABLE_ACTIVITY: true,
   REPORT_ENABLE_SLEEP: true,
   REPORT_ENABLE_HEART_RATE: true,
-  REPORT_ENABLE_CONNECTED: true,
   REPORT_ENABLE_DEVICE_INFO: true,
 };
 
@@ -535,20 +533,18 @@ function sendHaChannelToWatch(item) {
   }, HA_CHANNEL_THROTTLE_MS);
 }
 
-function reportStatusToHomeAssistant(payload) {
+// Shared by the watch-relayed report below and the phone-native connection
+// check further down — both ultimately just send a status object over the
+// same pebble_dashboard/report_status command.
+// Returns whether the status was actually sent, so callers that track
+// "last known state" (see checkWatchConnection() below) can avoid
+// recording a state they never actually got through to HA.
+function sendStatusToHomeAssistant(status) {
   if (!haAuthenticated || !haSocket) {
-    return; // no connection yet; the next periodic report from the watch will retry
+    return false; // no connection yet; the next periodic report will retry
   }
-
-  var status = {};
-  Object.keys(payload || {}).forEach(function (key) {
-    if (key.indexOf("REPORT_") === 0) {
-      status[key.substring("REPORT_".length).toLowerCase()] = payload[key];
-    }
-  });
-
-  if (Object.keys(status).length === 0) {
-    return;
+  if (!status || Object.keys(status).length === 0) {
+    return false;
   }
 
   haSocket.send(
@@ -558,7 +554,54 @@ function reportStatusToHomeAssistant(payload) {
       status: status,
     })
   );
+  return true;
 }
+
+function reportStatusToHomeAssistant(payload) {
+  var status = {};
+  Object.keys(payload || {}).forEach(function (key) {
+    if (key.indexOf("REPORT_") === 0) {
+      status[key.substring("REPORT_".length).toLowerCase()] = payload[key];
+    }
+  });
+  sendStatusToHomeAssistant(status);
+}
+
+// Connection status is deliberately reported from here, not relayed from
+// the watch's own AppMessage report (see health_report.c — a
+// REPORT_CONNECTED field the watch had to send in order for the phone to
+// receive it was tautological, since the watch has no way to report "I'm
+// disconnected" the one time that would actually be true). The phone's own
+// Bluetooth/OS layer knows about a disconnect independently, without
+// needing the watch's cooperation, and Pebble.getActiveWatchInfo() reading
+// that is pure local JS — no AppMessage, no watch-side battery cost.
+// Reliability of getActiveWatchInfo() tracking real disconnects across
+// phone platforms/Pebble app versions hasn't been proven yet on real
+// hardware; if it turns out to be unreliable, drop this rather than try to
+// paper over it with polling tricks.
+var WATCH_CONNECTION_POLL_MS = 30000;
+var haLastKnownWatchConnected = null; // null = not yet checked
+
+function isWatchConnected() {
+  return !!(Pebble.getActiveWatchInfo && Pebble.getActiveWatchInfo());
+}
+
+function checkWatchConnection() {
+  var connected = isWatchConnected();
+  if (connected === haLastKnownWatchConnected) {
+    return;
+  }
+  // Only commit the new state once it's actually reached HA — if we're not
+  // authenticated yet (e.g. this fires from `ready` before the WebSocket
+  // handshake finishes), leave haLastKnownWatchConnected as-is so the next
+  // poll still sees a "change" and retries, rather than silently losing
+  // the very first connection report.
+  if (sendStatusToHomeAssistant({ connected: connected ? 1 : 0 })) {
+    haLastKnownWatchConnected = connected;
+  }
+}
+
+setInterval(checkWatchConnection, WATCH_CONNECTION_POLL_MS);
 
 Pebble.addEventListener("appmessage", function (e) {
   reportStatusToHomeAssistant(e.payload);
@@ -612,6 +655,7 @@ function connectToHomeAssistant() {
       // below) and subscribes to future changes ("event" messages tagged
       // with this same id) — no separate request-state round trip needed.
       haSocket.send(JSON.stringify({ id: haSubscriptionId, type: HA_SUBSCRIBE_COMMAND }));
+      checkWatchConnection(); // report current connection state promptly, not up to WATCH_CONNECTION_POLL_MS late
     } else if (message.type === "auth_invalid") {
       console.log("Home Assistant auth failed: " + message.message);
       notifyHaConnectionFailure("Home Assistant login failed. Check HA_TOKEN in the watchapp settings.");

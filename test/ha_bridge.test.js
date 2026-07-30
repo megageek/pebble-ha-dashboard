@@ -62,6 +62,7 @@ function freshEnv() {
   var listeners = {};
   var sentAppMessages = [];
   var scheduledTimeouts = [];
+  var scheduledIntervals = [];
   var lastSocket = null;
   var notifications = [];
 
@@ -126,6 +127,20 @@ function freshEnv() {
   global.clearTimeout = function (timer) {
     var index = scheduledTimeouts.indexOf(timer);
     if (index !== -1) scheduledTimeouts.splice(index, 1);
+  };
+  // Never fires automatically — a real setInterval would keep the real
+  // Node process alive across every test (each freshEnv() re-requires the
+  // bundle, so a real interval would also stack up new intervals on every
+  // test). Tests that care about periodic behavior fire it manually via
+  // env.scheduledIntervals.
+  global.setInterval = function (cb, delay) {
+    var timer = { cb: cb, delay: delay };
+    scheduledIntervals.push(timer);
+    return timer;
+  };
+  global.clearInterval = function (timer) {
+    var index = scheduledIntervals.indexOf(timer);
+    if (index !== -1) scheduledIntervals.splice(index, 1);
   };
 
   // Each test needs its own copy of the bridge's module-level state
@@ -202,6 +217,7 @@ function freshEnv() {
     sendAppMessageFromWatch: sendAppMessageFromWatch,
     sentAppMessages: sentAppMessages,
     scheduledTimeouts: scheduledTimeouts,
+    scheduledIntervals: scheduledIntervals,
     notifications: notifications,
     getLastSocket: function () {
       return lastSocket;
@@ -225,10 +241,92 @@ function freshEnv() {
   assert(socket.sent.length === 1, "sends nothing else before auth_ok, got " + socket.sent.length);
 
   socket.onmessage({ data: JSON.stringify({ type: "auth_ok" }) });
-  assert(socket.sent.length === 2, "sends exactly one more message after auth_ok, got " + socket.sent.length);
+  // Two more: the subscribe_channels command, then a phone-native
+  // connection-status report_status (see checkWatchConnection() in
+  // src/pkjs/index.js) — sent right after subscribing, not relayed from
+  // the watch's own AppMessage report.
+  assert(socket.sent.length === 3, "sends two more messages after auth_ok, got " + socket.sent.length);
   assert(
     socket.sent[1].type === HA_SUBSCRIBE_COMMAND && typeof socket.sent[1].id === "number",
-    "sends the subscribe_channels command with a request id, got " + JSON.stringify(socket.sent[1])
+    "sends the subscribe_channels command with a request id first, got " + JSON.stringify(socket.sent[1])
+  );
+  assert(
+    socket.sent[2].type === "pebble_dashboard/report_status" && socket.sent[2].status.connected === 0,
+    "sends a phone-native connection-status report right after subscribing, got " + JSON.stringify(socket.sent[2])
+  );
+})();
+
+// --- Test 1b: connection status is only re-sent when it actually changes,
+// not on every periodic poll (see checkWatchConnection() / setInterval in
+// src/pkjs/index.js) — the whole point of this being phone-native is to
+// cost nothing extra, so a steady-state watch must not generate a message
+// every WATCH_CONNECTION_POLL_MS regardless of state. ---
+(function testWatchConnectionDedupedWhenUnchanged() {
+  var env = freshEnv();
+  env.authenticate(); // getActiveWatchInfo mock returns null -> connected:0 sent once
+  var socket = env.getLastSocket();
+  var sentBefore = socket.sent.length;
+
+  var pollTimer = env.scheduledIntervals[0];
+  assert(pollTimer, "a periodic connection-check interval was scheduled");
+  pollTimer.cb();
+  pollTimer.cb();
+  pollTimer.cb();
+
+  assert(
+    socket.sent.length === sentBefore,
+    "repeated polls with no actual change send nothing new, got " + (socket.sent.length - sentBefore) + " new message(s)"
+  );
+})();
+
+// --- Test 1c: a real change in watch connectivity, picked up on the next
+// poll, is reported — and only once, not every subsequent poll ---
+(function testWatchConnectionChangeDetectedViaPoll() {
+  var env = freshEnv();
+  env.authenticate();
+  var socket = env.getLastSocket();
+
+  global.Pebble.getActiveWatchInfo = function () {
+    return { platform: "emery" }; // now "connected"
+  };
+
+  var pollTimer = env.scheduledIntervals[0];
+  pollTimer.cb();
+
+  var reportMsg = socket.sent[socket.sent.length - 1];
+  assert(
+    reportMsg.type === "pebble_dashboard/report_status" && reportMsg.status.connected === 1,
+    "a real connectivity change is reported, got " + JSON.stringify(reportMsg)
+  );
+
+  var sentAfterChange = socket.sent.length;
+  pollTimer.cb();
+  assert(socket.sent.length === sentAfterChange, "the same (still-connected) state polled again sends nothing new");
+})();
+
+// --- Test 1d: if the very first connection check happens before HA is
+// authenticated (e.g. fired from `ready`, before the WebSocket handshake
+// finishes), the state isn't wrongly recorded as "already reported" —
+// regression test for a bug where haLastKnownWatchConnected would be set
+// even though sendStatusToHomeAssistant() silently dropped the send. ---
+(function testWatchConnectionNotLostWhenUnauthenticated() {
+  var env = freshEnv();
+  env.fire("ready"); // socket opens, but not yet authenticated
+  var pollTimer = env.scheduledIntervals[0];
+  assert(pollTimer, "a periodic connection-check interval was scheduled from ready");
+
+  pollTimer.cb(); // fires while unauthenticated; must be silently dropped, not recorded as sent
+  var socket = env.getLastSocket();
+  assert(socket.sent.length === 0, "nothing sent to HA before authentication completes");
+
+  socket.onmessage({ data: JSON.stringify({ type: "auth_required" }) });
+  socket.onmessage({ data: JSON.stringify({ type: "auth_ok" }) });
+
+  var reportMsg = socket.sent[socket.sent.length - 1];
+  assert(
+    reportMsg.type === "pebble_dashboard/report_status" && reportMsg.status.connected === 0,
+    "connection status is still reported once authenticated, not lost from the earlier dropped attempt, got " +
+      JSON.stringify(reportMsg)
   );
 })();
 
@@ -933,8 +1031,8 @@ function freshEnv() {
 // sample-checked a few fields, and the real bug (TEMPLATE_INDEX/
 // SLOT_n_CHANNEL/DOT_* sent as Clay's native strings instead of numbers)
 // was found by manually auditing every field against config_message.c's
-// exact reads: 24 fields (TEMPLATE_INDEX, 10x SLOT_n_CHANNEL,
-// 7x REPORT_ENABLE_*, DOT_GROUP_SLOT, 4x DOT_n_CHANNEL, DOT_SIZE) are read
+// exact reads: 23 fields (TEMPLATE_INDEX, 10x SLOT_n_CHANNEL,
+// 6x REPORT_ENABLE_*, DOT_GROUP_SLOT, 4x DOT_n_CHANNEL, DOT_SIZE) are read
 // with a blind dict_find(...)->value->int32 and MUST arrive as numbers;
 // the other 45 (color/hide-when selects) are read behind a
 // `type == TUPLE_CSTRING` check and MUST stay strings. Values below mirror
@@ -958,7 +1056,7 @@ function freshEnv() {
   }
   [
     "REPORT_ENABLE_BATTERY", "REPORT_ENABLE_STEPS", "REPORT_ENABLE_ACTIVITY", "REPORT_ENABLE_SLEEP",
-    "REPORT_ENABLE_HEART_RATE", "REPORT_ENABLE_CONNECTED", "REPORT_ENABLE_DEVICE_INFO",
+    "REPORT_ENABLE_HEART_RATE", "REPORT_ENABLE_DEVICE_INFO",
   ].forEach(function (key) {
     claySettings[key] = true; // toggle -> real boolean from Clay
   });
@@ -975,8 +1073,8 @@ function freshEnv() {
   });
 
   assert(
-    Object.keys(claySettings).length === 69,
-    "test setup sanity check: exactly 69 WATCH_SETTINGS_KEYS fields, got " + Object.keys(claySettings).length
+    Object.keys(claySettings).length === 68,
+    "test setup sanity check: exactly 68 WATCH_SETTINGS_KEYS fields, got " + Object.keys(claySettings).length
   );
 
   var pendingCallbacks = [];
@@ -998,7 +1096,7 @@ function freshEnv() {
   var numericKeys = Object.keys(merged).filter(function (k) {
     return /^(TEMPLATE_INDEX|SLOT_\d+_CHANNEL|REPORT_ENABLE_\w+|DOT_GROUP_SLOT|DOT_\d+_CHANNEL|DOT_SIZE)$/.test(k);
   });
-  assert(numericKeys.length === 24, "found all 24 numerically-read fields, got " + numericKeys.length);
+  assert(numericKeys.length === 23, "found all 23 numerically-read fields, got " + numericKeys.length);
   numericKeys.forEach(function (k) {
     assert(typeof merged[k] === "number", k + " sent as a number (watch reads it with a blind ->value->int32), got " + typeof merged[k]);
   });
@@ -1208,18 +1306,19 @@ function freshEnv() {
   );
 })();
 
-// --- Test 10c: every remaining report_status field (connected,
-// active_seconds, distance_meters, active_kcal, resting_kcal,
-// sleep_seconds, sleep_restful_seconds, model, firmware, color) relays
-// correctly — testStatusReportRelay/testDisabledGroupsRelay above only
-// exercise a subset ---
+// --- Test 10c: every remaining report_status field (active_seconds,
+// distance_meters, active_kcal, resting_kcal, sleep_seconds,
+// sleep_restful_seconds, model, firmware, color) relays correctly —
+// testStatusReportRelay/testDisabledGroupsRelay above only exercise a
+// subset. `connected` is deliberately not part of the watch's own report
+// (see checkWatchConnection() in src/pkjs/index.js and its own tests) —
+// it's reported by the phone independently, not relayed from here. ---
 (function testAllStatusReportFieldsRelay() {
   var env = freshEnv();
   env.authenticate();
   var socket = env.getLastSocket();
 
   env.sendAppMessageFromWatch({
-    REPORT_CONNECTED: 1,
     REPORT_ACTIVE_SECONDS: 1800,
     REPORT_DISTANCE_METERS: 3120,
     REPORT_ACTIVE_KCAL: 210,
@@ -1233,8 +1332,7 @@ function freshEnv() {
 
   var reportMsg = socket.sent[socket.sent.length - 1];
   assert(
-    reportMsg.status.connected === 1 &&
-      reportMsg.status.active_seconds === 1800 &&
+    reportMsg.status.active_seconds === 1800 &&
       reportMsg.status.distance_meters === 3120 &&
       reportMsg.status.active_kcal === 210 &&
       reportMsg.status.resting_kcal === 2918 &&

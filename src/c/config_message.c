@@ -447,8 +447,7 @@ void inbox_received_callback(DictionaryIterator *iterator, void *context) {
     const uint32_t report_enable_keys[NUM_REPORT_GROUPS] = {
         MESSAGE_KEY_REPORT_ENABLE_BATTERY, MESSAGE_KEY_REPORT_ENABLE_STEPS,
         MESSAGE_KEY_REPORT_ENABLE_ACTIVITY, MESSAGE_KEY_REPORT_ENABLE_SLEEP,
-        MESSAGE_KEY_REPORT_ENABLE_HEART_RATE, MESSAGE_KEY_REPORT_ENABLE_CONNECTED,
-        MESSAGE_KEY_REPORT_ENABLE_DEVICE_INFO,
+        MESSAGE_KEY_REPORT_ENABLE_HEART_RATE, MESSAGE_KEY_REPORT_ENABLE_DEVICE_INFO,
     };
     for (int i = 0; i < NUM_REPORT_GROUPS; i++) {
         Tuple *tuple = dict_find(iterator, report_enable_keys[i]);

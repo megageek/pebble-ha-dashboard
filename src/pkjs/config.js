@@ -319,12 +319,6 @@ module.exports = [
   },
   {
     type: "toggle",
-    messageKey: "REPORT_ENABLE_CONNECTED",
-    label: "Connection status",
-    defaultValue: true,
-  },
-  {
-    type: "toggle",
     messageKey: "REPORT_ENABLE_DEVICE_INFO",
     label: "Device info (model/firmware/color)",
     defaultValue: true,

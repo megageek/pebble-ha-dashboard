@@ -19,13 +19,16 @@
 #define PERSIST_KEY_CONN_ON_COLOR 323
 #define PERSIST_KEY_CONN_OFF_COLOR 324
 #define PERSIST_KEY_CONN_HIDE_WHEN 325
+#define PERSIST_KEY_HA_CONN_ON_COLOR 327
+#define PERSIST_KEY_HA_CONN_OFF_COLOR 328
+#define PERSIST_KEY_HA_CONN_HIDE_WHEN 329
 
 // General-purpose slot styling (background/value/label colors), Clay-
 // configurable per local channel; HA sets these directly on its own remote
 // channels over the wire instead (see apply_ha_channel_updates() below).
 // Channel i (index into local_color_channels[]) field f (0=bg,1=value,
 // 2=label) -> PERSIST_KEY_LOCAL_COLOR_BASE + i*3 + f.
-#define PERSIST_KEY_LOCAL_COLOR_BASE 400  // through 400 + 13*3 - 1 = 438
+#define PERSIST_KEY_LOCAL_COLOR_BASE 400  // through 400 + 14*3 - 1 = 441
 
 void load_config(void) {
     s_active_template = 0;
@@ -103,8 +106,19 @@ void load_config(void) {
     if (persist_exists(PERSIST_KEY_CONN_HIDE_WHEN)) {
         s_channels[CHANNEL_CONNECTED].hide_when = (int8_t)persist_read_int(PERSIST_KEY_CONN_HIDE_WHEN);
     }
+    if (persist_exists(PERSIST_KEY_HA_CONN_ON_COLOR)) {
+        persist_read_string(PERSIST_KEY_HA_CONN_ON_COLOR, s_channels[CHANNEL_HA_CONNECTED].on_color,
+                             sizeof(s_channels[CHANNEL_HA_CONNECTED].on_color));
+    }
+    if (persist_exists(PERSIST_KEY_HA_CONN_OFF_COLOR)) {
+        persist_read_string(PERSIST_KEY_HA_CONN_OFF_COLOR, s_channels[CHANNEL_HA_CONNECTED].off_color,
+                             sizeof(s_channels[CHANNEL_HA_CONNECTED].off_color));
+    }
+    if (persist_exists(PERSIST_KEY_HA_CONN_HIDE_WHEN)) {
+        s_channels[CHANNEL_HA_CONNECTED].hide_when = (int8_t)persist_read_int(PERSIST_KEY_HA_CONN_HIDE_WHEN);
+    }
 
-    // General-purpose background/value/label colors for the 13 local
+    // General-purpose background/value/label colors for the 14 local
     // channels. Empty (unset) is the default already left in place by
     // init_channels(), so only overridden here if a Clay save persisted one.
     for (int i = 0; i < NUM_LOCAL_COLOR_CHANNELS; i++) {
@@ -338,8 +352,8 @@ static bool apply_ha_channel_updates(DictionaryIterator *iterator) {
     return changed;
 }
 
-// Applies TIME_BG_COLOR..HEART_RATE_LABEL_COLOR (39 keys, 3 per local
-// channel) for the 13 local channels. Split out of inbox_received_callback()
+// Applies TIME_BG_COLOR..HA_CONN_LABEL_COLOR (42 keys, 3 per local
+// channel) for the 14 local channels. Split out of inbox_received_callback()
 // for the same readability reason as apply_ha_channel_updates() above.
 static bool apply_local_channel_colors(DictionaryIterator *iterator) {
     bool changed = false;
@@ -348,19 +362,19 @@ static bool apply_local_channel_colors(DictionaryIterator *iterator) {
         MESSAGE_KEY_TIME_BG_COLOR, MESSAGE_KEY_DATE_BG_COLOR, MESSAGE_KEY_BATTERY_BG_COLOR, MESSAGE_KEY_STEPS_BG_COLOR,
         MESSAGE_KEY_CHARGE_BG_COLOR, MESSAGE_KEY_CONN_BG_COLOR, MESSAGE_KEY_ACTIVE_MINUTES_BG_COLOR, MESSAGE_KEY_DISTANCE_BG_COLOR,
         MESSAGE_KEY_ACTIVE_KCAL_BG_COLOR, MESSAGE_KEY_RESTING_KCAL_BG_COLOR, MESSAGE_KEY_SLEEP_MINUTES_BG_COLOR,
-        MESSAGE_KEY_SLEEP_RESTFUL_MINUTES_BG_COLOR, MESSAGE_KEY_HEART_RATE_BG_COLOR,
+        MESSAGE_KEY_SLEEP_RESTFUL_MINUTES_BG_COLOR, MESSAGE_KEY_HEART_RATE_BG_COLOR, MESSAGE_KEY_HA_CONN_BG_COLOR,
     };
     const uint32_t local_value_color_keys[NUM_LOCAL_COLOR_CHANNELS] = {
         MESSAGE_KEY_TIME_VALUE_COLOR, MESSAGE_KEY_DATE_VALUE_COLOR, MESSAGE_KEY_BATTERY_VALUE_COLOR, MESSAGE_KEY_STEPS_VALUE_COLOR,
         MESSAGE_KEY_CHARGE_VALUE_COLOR, MESSAGE_KEY_CONN_VALUE_COLOR, MESSAGE_KEY_ACTIVE_MINUTES_VALUE_COLOR, MESSAGE_KEY_DISTANCE_VALUE_COLOR,
         MESSAGE_KEY_ACTIVE_KCAL_VALUE_COLOR, MESSAGE_KEY_RESTING_KCAL_VALUE_COLOR, MESSAGE_KEY_SLEEP_MINUTES_VALUE_COLOR,
-        MESSAGE_KEY_SLEEP_RESTFUL_MINUTES_VALUE_COLOR, MESSAGE_KEY_HEART_RATE_VALUE_COLOR,
+        MESSAGE_KEY_SLEEP_RESTFUL_MINUTES_VALUE_COLOR, MESSAGE_KEY_HEART_RATE_VALUE_COLOR, MESSAGE_KEY_HA_CONN_VALUE_COLOR,
     };
     const uint32_t local_label_color_keys[NUM_LOCAL_COLOR_CHANNELS] = {
         MESSAGE_KEY_TIME_LABEL_COLOR, MESSAGE_KEY_DATE_LABEL_COLOR, MESSAGE_KEY_BATTERY_LABEL_COLOR, MESSAGE_KEY_STEPS_LABEL_COLOR,
         MESSAGE_KEY_CHARGE_LABEL_COLOR, MESSAGE_KEY_CONN_LABEL_COLOR, MESSAGE_KEY_ACTIVE_MINUTES_LABEL_COLOR, MESSAGE_KEY_DISTANCE_LABEL_COLOR,
         MESSAGE_KEY_ACTIVE_KCAL_LABEL_COLOR, MESSAGE_KEY_RESTING_KCAL_LABEL_COLOR, MESSAGE_KEY_SLEEP_MINUTES_LABEL_COLOR,
-        MESSAGE_KEY_SLEEP_RESTFUL_MINUTES_LABEL_COLOR, MESSAGE_KEY_HEART_RATE_LABEL_COLOR,
+        MESSAGE_KEY_SLEEP_RESTFUL_MINUTES_LABEL_COLOR, MESSAGE_KEY_HEART_RATE_LABEL_COLOR, MESSAGE_KEY_HA_CONN_LABEL_COLOR,
     };
 
     for (int i = 0; i < NUM_LOCAL_COLOR_CHANNELS; i++) {
@@ -440,6 +454,20 @@ void inbox_received_callback(DictionaryIterator *iterator, void *context) {
     // rather than inline here.
     bool value_changed = apply_ha_channel_updates(iterator);
 
+    // The phone's own live HA WebSocket connection state (see
+    // CHANNEL_HA_CONNECTED in types.h) — pushed by pkjs's
+    // sendHaConnectionStatusToWatch() whenever haAuthenticated changes. Not
+    // persisted, same as HA channel values: pkjs resends current state on
+    // every reconnect.
+    Tuple *ha_conn_tuple = dict_find(iterator, MESSAGE_KEY_HA_CONN_VALUE);
+    if (ha_conn_tuple) {
+        int32_t value = ha_conn_tuple->value->int32 != 0 ? 1 : 0;
+        if (s_channels[CHANNEL_HA_CONNECTED].value != value) {
+            s_channels[CHANNEL_HA_CONNECTED].value = value;
+            value_changed = true;
+        }
+    }
+
     // Per-measure reporting toggles from Clay config. Changing one doesn't
     // affect what's shown on the watch face at all — only what gets reported
     // out — so it's tracked separately from layout_changed/value_changed.
@@ -515,6 +543,12 @@ void inbox_received_callback(DictionaryIterator *iterator, void *context) {
                                 MESSAGE_KEY_CONN_OFF_COLOR, MESSAGE_KEY_CONN_HIDE_WHEN,
                                 PERSIST_KEY_CONN_ON_COLOR, PERSIST_KEY_CONN_OFF_COLOR,
                                 PERSIST_KEY_CONN_HIDE_WHEN)) {
+        dot_config_changed = true;
+    }
+    if (apply_dot_color_config(iterator, CHANNEL_HA_CONNECTED, MESSAGE_KEY_HA_CONN_ON_COLOR,
+                                MESSAGE_KEY_HA_CONN_OFF_COLOR, MESSAGE_KEY_HA_CONN_HIDE_WHEN,
+                                PERSIST_KEY_HA_CONN_ON_COLOR, PERSIST_KEY_HA_CONN_OFF_COLOR,
+                                PERSIST_KEY_HA_CONN_HIDE_WHEN)) {
         dot_config_changed = true;
     }
 

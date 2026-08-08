@@ -1,13 +1,13 @@
 // Clay configuration schema for the HA Dashboard watchface.
 //
 // Channel values below must stay in sync with the ChannelIndex enum in
-// src/c/main.c: 0=TIME, 1=DATE, 2=BATTERY, 3=STEPS, 4=HA1, 5=HA2, 6=HA3,
+// src/c/types.h: 0=TIME, 1=DATE, 2=BATTERY, 3=STEPS, 4=HA1, 5=HA2, 6=HA3,
 // 7=BATTERY_CHARGING, 8=CONNECTED, 9=ACTIVE_MINUTES, 10=DISTANCE,
 // 11=ACTIVE_KCAL, 12=RESTING_KCAL, 13=SLEEP_MINUTES, 14=SLEEP_RESTFUL_MINUTES,
-// 15=HEART_RATE, 16=HA4, 17=HA5, 18=HA6, 19=HA7, 20=HA8, 21=HA9, 22=HA10.
-// The new ones (7-15, then 16-22) are each appended after whatever came
-// before them rather than interleaved, so a previously-persisted slot
-// assignment keeps meaning the same channel.
+// 15=HEART_RATE, 16=HA4, 17=HA5, 18=HA6, 19=HA7, 20=HA8, 21=HA9, 22=HA10,
+// 23=HA_CONNECTED. The new ones (7-15, then 16-22, then 23) are each
+// appended after whatever came before them rather than interleaved, so a
+// previously-persisted slot assignment keeps meaning the same channel.
 var CHANNEL_OPTIONS = [
   { label: "Time", value: 0 },
   { label: "Date", value: 1 },
@@ -32,6 +32,7 @@ var CHANNEL_OPTIONS = [
   { label: "HA channel 8", value: 20 },
   { label: "HA channel 9", value: 21 },
   { label: "HA channel 10", value: 22 },
+  { label: "HA connected", value: 23 },
 ];
 
 function slotSelect(slotIndex, defaultChannel) {
@@ -61,6 +62,7 @@ var DOT_CHANNEL_OPTIONS = [
   { label: "HA channel 8", value: 20 },
   { label: "HA channel 9", value: 21 },
   { label: "HA channel 10", value: 22 },
+  { label: "HA connected", value: 23 },
 ];
 
 // Shared with HA's on_color/off_color fields (see HA_INTEGRATION_SPEC.md)
@@ -129,11 +131,11 @@ function colorSelectWithDefault(messageKey, label) {
   };
 }
 
-// The 13 local (non-HA) channels that get their own background/value/label
+// The 14 local (non-HA) channels that get their own background/value/label
 // color pickers below. messageKey prefixes must match local_color_channels[]
-// in main.c exactly (CHARGE/CONN reuse the same prefixes as their existing
-// on/off dot colors). HA channels 1-10 get the equivalent fields directly
-// from HA over the wire instead (see HA_INTEGRATION_SPEC.md).
+// in main.c exactly (CHARGE/CONN/HA_CONN reuse the same prefixes as their
+// existing on/off dot colors). HA channels 1-10 get the equivalent fields
+// directly from HA over the wire instead (see HA_INTEGRATION_SPEC.md).
 var CHANNEL_COLOR_FIELDS = [
   { prefix: "TIME", label: "Time" },
   { prefix: "DATE", label: "Date" },
@@ -148,6 +150,7 @@ var CHANNEL_COLOR_FIELDS = [
   { prefix: "SLEEP_MINUTES", label: "Sleep minutes" },
   { prefix: "SLEEP_RESTFUL_MINUTES", label: "Restful sleep minutes" },
   { prefix: "HEART_RATE", label: "Heart rate" },
+  { prefix: "HA_CONN", label: "HA connected" },
 ];
 
 function channelColorFields(prefix, label) {
@@ -253,7 +256,7 @@ module.exports = [
   {
     type: "text",
     defaultValue:
-      "Colors for the two local dot-capable channels below. HA channels " +
+      "Colors for the three local dot-capable channels below. HA channels " +
       "set their own colors when pushing a value (see HA_INTEGRATION_SPEC.md).",
   },
   colorSelect("CHARGE_ON_COLOR", "Battery charging: ON color", "green"),
@@ -262,6 +265,9 @@ module.exports = [
   colorSelect("CONN_ON_COLOR", "Phone connected: ON color", "green"),
   colorSelect("CONN_OFF_COLOR", "Phone connected: OFF color", "red"),
   hideWhenSelect("CONN_HIDE_WHEN", "Phone connected: visibility"),
+  colorSelect("HA_CONN_ON_COLOR", "HA connected: ON color", "green"),
+  colorSelect("HA_CONN_OFF_COLOR", "HA connected: OFF color", "red"),
+  hideWhenSelect("HA_CONN_HIDE_WHEN", "HA connected: visibility"),
   {
     type: "heading",
     defaultValue: "Channel Colors",

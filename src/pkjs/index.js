@@ -38,6 +38,9 @@ var WATCH_SETTINGS_KEYS = [
   "CONN_ON_COLOR",
   "CONN_OFF_COLOR",
   "CONN_HIDE_WHEN",
+  "HA_CONN_ON_COLOR",
+  "HA_CONN_OFF_COLOR",
+  "HA_CONN_HIDE_WHEN",
   "TIME_BG_COLOR",
   "TIME_VALUE_COLOR",
   "TIME_LABEL_COLOR",
@@ -56,6 +59,9 @@ var WATCH_SETTINGS_KEYS = [
   "CONN_BG_COLOR",
   "CONN_VALUE_COLOR",
   "CONN_LABEL_COLOR",
+  "HA_CONN_BG_COLOR",
+  "HA_CONN_VALUE_COLOR",
+  "HA_CONN_LABEL_COLOR",
   "ACTIVE_MINUTES_BG_COLOR",
   "ACTIVE_MINUTES_VALUE_COLOR",
   "ACTIVE_MINUTES_LABEL_COLOR",
@@ -193,7 +199,10 @@ Pebble.addEventListener("webviewclosed", function (e) {
   // config synchronously, with no defer at all, directly inside its
   // webviewclosed handler, and does so reliably. Dispatching synchronously
   // here too, matching that working pattern.
-  sendWatchSettings(watchSettings, connectToHomeAssistant);
+  sendWatchSettings(watchSettings, function () {
+    haConnectionAttemptIsSaveTriggered = true;
+    connectToHomeAssistant();
+  });
 
   // A config save is a fresh user-initiated attempt — allow a failure to
   // notify again even if the previous URL/token already triggered one.
@@ -347,12 +356,29 @@ var haSubscriptionId = null;
 // True only between auth_ok and the connection being replaced/dropped —
 // gates outbound status reports so they're never sent to a half-open socket.
 var haAuthenticated = false;
-// Set the first time a connection attempt fails (auth_invalid, or a close
-// without ever reaching auth_ok) since the last user-initiated attempt
-// (app launch or a Clay config save). Without this, a bad URL/token would
-// renotify on every automatic reconnect forever, since scheduleHaReconnect()
-// retries indefinitely.
+// Only a failure from a connection attempt directly triggered by a Clay
+// config save should ever pop a watch notification (see
+// haConnectionAttemptIsSaveTriggered below) — never an automatic background
+// reconnect or a pkjs-relaunch-triggered attempt. Real-device reports: pkjs's
+// JS context gets killed/restarted by the phone OS fairly often in the
+// background, and each restart used to re-arm a plain module-level flag,
+// so a stretch of poor connectivity produced a notification per restart
+// instead of just one at save time.
+//
+// haFailureNotified still matters on top of that gating: it dedupes
+// multiple failure signals for the SAME save-triggered attempt (e.g.
+// auth_invalid firing, immediately followed by the onclose it causes) so
+// that one bad save doesn't pop two notifications.
 var haFailureNotified = false;
+// Set to true immediately before a save-triggered call to
+// connectToHomeAssistant() (see the webviewclosed handler below), then
+// captured into a local var and reset at the top of connectToHomeAssistant()
+// itself so it can't leak into a later automatic reconnect. Each call's
+// onmessage/onclose closures capture their own copy, so this correctly
+// distinguishes a save-triggered attempt from the other two call sites
+// (scheduleHaReconnect's automatic retry, and the `ready` listener) even
+// across repeated reconnects.
+var haConnectionAttemptIsSaveTriggered = false;
 // Sticky per-channel "kind" cache (phone-side). The watch's ch->kind is
 // already sticky (see apply_ha_channel_updates() in main.c); HA is allowed
 // to send `kind` once and omit it on every later value-only update (see
@@ -603,12 +629,43 @@ function checkWatchConnection() {
 
 setInterval(checkWatchConnection, WATCH_CONNECTION_POLL_MS);
 
+// The other direction: the phone's own connection state TO Home Assistant
+// (haAuthenticated), pushed to the watch so it can be shown on-face (see
+// CHANNEL_HA_CONNECTED in src/c/types.h) instead of relying solely on the
+// notifyHaConnectionFailure() popup above. Distinct from
+// checkWatchConnection()/isWatchConnected() above, which track the
+// watch<->phone Bluetooth link, not this phone<->HA WebSocket link — easy
+// to conflate since both are phone-native, pushed, deduped signals, but
+// they track different things and feed different channels.
+//
+// Dedup is optimistic (updated at send time), unlike
+// haLastKnownWatchConnected's confirmed-delivery gating above — reasonable
+// here since sendAppMessageWithRetry() already guarantees eventual
+// delivery via its own retry queue, the same assumption sendHaChannelToWatch()
+// already makes for its own haChannelLastSentDict cache.
+var haConnLastSentToWatch = null; // null = not yet sent
+
+function sendHaConnectionStatusToWatch(connected) {
+  if (connected === haConnLastSentToWatch) {
+    return;
+  }
+  haConnLastSentToWatch = connected;
+  sendAppMessageWithRetry({ HA_CONN_VALUE: connected ? 1 : 0 }, "HA connection status");
+}
+
 Pebble.addEventListener("appmessage", function (e) {
   reportStatusToHomeAssistant(e.payload);
 });
 
 function connectToHomeAssistant() {
   var config = getHaConfig();
+
+  // Captured immediately, before any early return below, so a save-triggered
+  // attempt is "consumed" by this call and can't leak into a later
+  // automatic reconnect. See haConnectionAttemptIsSaveTriggered's own
+  // declaration for why this exists.
+  var isSaveTriggered = haConnectionAttemptIsSaveTriggered;
+  haConnectionAttemptIsSaveTriggered = false;
 
   // Tear down any existing connection unconditionally, even if the new
   // config turns out to be unset below — otherwise clearing HA_URL/HA_TOKEN
@@ -656,9 +713,12 @@ function connectToHomeAssistant() {
       // with this same id) — no separate request-state round trip needed.
       haSocket.send(JSON.stringify({ id: haSubscriptionId, type: HA_SUBSCRIBE_COMMAND }));
       checkWatchConnection(); // report current connection state promptly, not up to WATCH_CONNECTION_POLL_MS late
+      sendHaConnectionStatusToWatch(true);
     } else if (message.type === "auth_invalid") {
       console.log("Home Assistant auth failed: " + message.message);
-      notifyHaConnectionFailure("Home Assistant login failed. Check HA_TOKEN in the watchapp settings.");
+      if (isSaveTriggered) {
+        notifyHaConnectionFailure("Home Assistant login failed. Check HA_TOKEN in the watchapp settings.");
+      }
     } else if (message.id === haSubscriptionId && message.type === "result") {
       if (!message.success) {
         // Most likely cause: the HA-side integration isn't installed, so
@@ -683,13 +743,14 @@ function connectToHomeAssistant() {
 
   haSocket.onclose = function () {
     console.log("Home Assistant socket closed");
-    if (!haAuthenticated) {
+    if (!haAuthenticated && isSaveTriggered) {
       // Never got as far as auth_ok this attempt — most likely an
       // unreachable/misconfigured HA_URL (auth_invalid, handled above,
       // already covers a reachable host that rejected the token).
       notifyHaConnectionFailure("Couldn't connect to Home Assistant. Check HA_URL in the watchapp settings.");
     }
     haAuthenticated = false;
+    sendHaConnectionStatusToWatch(false);
     scheduleHaReconnect();
   };
 }

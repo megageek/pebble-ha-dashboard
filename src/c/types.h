@@ -6,16 +6,16 @@
 #define NUM_CONFIGURABLE_SLOTS 10  // must match the SLOT_n_CHANNEL messageKeys in package.json
 #define NUM_HA_CHANNELS 10  // must match the HAn_VALUE/HAn_LABEL messageKeys in package.json
 #define MAX_DOTS 4
-#define NUM_LOCAL_COLOR_CHANNELS 13
+#define NUM_LOCAL_COLOR_CHANNELS 14
 
 // Channel values below must stay in sync with config.js's CHANNEL_OPTIONS:
 // 0=TIME, 1=DATE, 2=BATTERY, 3=STEPS, 4=HA1, 5=HA2, 6=HA3,
 // 7=BATTERY_CHARGING, 8=CONNECTED, 9=ACTIVE_MINUTES, 10=DISTANCE,
 // 11=ACTIVE_KCAL, 12=RESTING_KCAL, 13=SLEEP_MINUTES, 14=SLEEP_RESTFUL_MINUTES,
-// 15=HEART_RATE, 16=HA4, 17=HA5, 18=HA6, 19=HA7, 20=HA8, 21=HA9, 22=HA10.
-// The new ones (7-15, then 16-22) are each appended after whatever came
-// before them rather than interleaved, so a previously-persisted slot
-// assignment keeps meaning the same channel.
+// 15=HEART_RATE, 16=HA4, 17=HA5, 18=HA6, 19=HA7, 20=HA8, 21=HA9, 22=HA10,
+// 23=HA_CONNECTED. The new ones (7-15, then 16-22, then 23) are each
+// appended after whatever came before them rather than interleaved, so a
+// previously-persisted slot assignment keeps meaning the same channel.
 typedef enum {
     CHANNEL_TIME,
     CHANNEL_DATE,
@@ -49,6 +49,15 @@ typedef enum {
     CHANNEL_HA_8,
     CHANNEL_HA_9,
     CHANNEL_HA_10,
+    // The phone's live connection state to Home Assistant (not the HA-side
+    // integration's state, and not the watch<->phone Bluetooth link that
+    // CHANNEL_CONNECTED already tracks). Unlike every channel above, this
+    // one has no on-watch API to read it from at all — pkjs pushes it via
+    // HA_CONN_VALUE whenever its own WebSocket auth state changes (see
+    // haAuthenticated in src/pkjs/index.js). Appended last, after
+    // CHANNEL_HA_10, for the same persisted-slot-compatibility reason as
+    // every other group above.
+    CHANNEL_HA_CONNECTED,
     NUM_CHANNELS,
 } ChannelIndex;
 

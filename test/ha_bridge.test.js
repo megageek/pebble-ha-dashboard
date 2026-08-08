@@ -61,6 +61,12 @@ function assert(cond, msg) {
 function freshEnv() {
   var listeners = {};
   var sentAppMessages = [];
+  // HA_CONN_VALUE (see sendHaConnectionStatusToWatch() in src/pkjs/index.js)
+  // is pushed automatically on every auth_ok/onclose, which every test
+  // using env.authenticate() triggers — kept out of sentAppMessages so the
+  // many pre-existing tests that index/count sentAppMessages positionally
+  // (channel relays, config chunks, etc.) don't have to account for it.
+  var haConnAppMessages = [];
   var scheduledTimeouts = [];
   var scheduledIntervals = [];
   var lastSocket = null;
@@ -98,7 +104,11 @@ function freshEnv() {
       return "";
     },
     sendAppMessage: function (dict, onSuccess) {
-      sentAppMessages.push(dict);
+      if ("HA_CONN_VALUE" in dict) {
+        haConnAppMessages.push(dict);
+      } else {
+        sentAppMessages.push(dict);
+      }
       if (onSuccess) onSuccess();
     },
     showSimpleNotificationOnPebble: function (title, body) {
@@ -216,6 +226,7 @@ function freshEnv() {
     sendRejectedResult: sendRejectedResult,
     sendAppMessageFromWatch: sendAppMessageFromWatch,
     sentAppMessages: sentAppMessages,
+    haConnAppMessages: haConnAppMessages,
     scheduledTimeouts: scheduledTimeouts,
     scheduledIntervals: scheduledIntervals,
     notifications: notifications,
@@ -748,9 +759,11 @@ function freshEnv() {
   );
 })();
 
-// --- Test 8b: auth_invalid (bad HA_TOKEN) shows exactly one watch
-// notification, not one per automatic reconnect retry ---
-(function testAuthInvalidNotifiesOnce() {
+// --- Test 8b: auth_invalid (bad HA_TOKEN) on a `ready`-triggered (not
+// save-triggered) connection attempt never notifies at all — only a
+// connection attempt caused directly by a Clay config save may notify
+// (see haConnectionAttemptIsSaveTriggered in src/pkjs/index.js) ---
+(function testAuthInvalidOnReadyDoesNotNotify() {
   var env = freshEnv();
   env.fire("ready");
   var socket1 = env.getLastSocket();
@@ -758,54 +771,69 @@ function freshEnv() {
   socket1.onmessage({ data: JSON.stringify({ type: "auth_invalid", message: "Invalid access token" }) });
   socket1.onclose();
 
-  assert(env.notifications.length === 1, "auth_invalid shows exactly one watch notification, got " + env.notifications.length);
-  assert(
-    /login failed/i.test(env.notifications[0].body),
-    "notification message mentions login failure, got " + JSON.stringify(env.notifications[0])
-  );
+  assert(env.notifications.length === 0, "a ready-triggered auth_invalid does not notify, got " + env.notifications.length);
 
-  // Automatic reconnect retries with the same bad token must not repeat it.
+  // Automatic reconnect retries with the same bad token must not notify either.
   env.scheduledTimeouts[0].cb();
   var socket2 = env.getLastSocket();
   socket2.onmessage({ data: JSON.stringify({ type: "auth_required" }) });
   socket2.onmessage({ data: JSON.stringify({ type: "auth_invalid", message: "Invalid access token" }) });
   socket2.onclose();
 
-  assert(env.notifications.length === 1, "repeated auth_invalid on auto-reconnect does not spam a second notification");
+  assert(env.notifications.length === 0, "repeated auth_invalid on auto-reconnect still does not notify");
 })();
 
 // --- Test 8c: a connection that never reaches auth_ok (bad/unreachable
-// HA_URL) also shows one generic notification, same suppression rule ---
-(function testUnreachableHostNotifiesGeneric() {
+// HA_URL), also `ready`-triggered, never notifies either ---
+(function testUnreachableHostOnReadyDoesNotNotify() {
   var env = freshEnv();
   env.fire("ready");
   env.getLastSocket().onclose(); // dropped before auth_required/auth_ok ever arrived
 
-  assert(env.notifications.length === 1, "a connection that never authenticates shows one notification, got " + env.notifications.length);
-  assert(
-    /couldn't connect|could not connect/i.test(env.notifications[0].body),
-    "generic connection-failure message, got " + JSON.stringify(env.notifications[0])
-  );
+  assert(env.notifications.length === 0, "a ready-triggered unreachable host does not notify, got " + env.notifications.length);
 
   env.scheduledTimeouts[0].cb();
   env.getLastSocket().onclose();
-  assert(env.notifications.length === 1, "repeated failure on auto-reconnect does not spam a second notification");
+  assert(env.notifications.length === 0, "repeated failure on auto-reconnect still does not notify");
 })();
 
-// --- Test 8d: a Clay config save is a fresh user-initiated attempt, so a
-// failure notifies again even if the previous URL/token already did ---
-(function testNotificationResetsAfterConfigSave() {
+// --- Test 8d: only a connection attempt directly triggered by a Clay
+// config save may notify, and it does so exactly once even though a
+// `ready`-triggered failure happened first and stayed silent ---
+(function testOnlyConfigSaveTriggeredFailureNotifies() {
   var env = freshEnv();
   env.fire("ready");
   env.getLastSocket().onclose();
-  assert(env.notifications.length === 1, "first failure notifies");
+  assert(env.notifications.length === 0, "ready-triggered failure notifies nothing");
 
   env.fire(
     "webviewclosed",
     { response: clayResponse({ HA_URL: "http://still-bad.local:8123", HA_TOKEN: "t" }) }
   );
   env.getLastSocket().onclose();
-  assert(env.notifications.length === 2, "a fresh failure after a config save notifies again, got " + env.notifications.length);
+  assert(env.notifications.length === 1, "a config-save-triggered failure notifies once, got " + env.notifications.length);
+  assert(
+    /couldn't connect|could not connect/i.test(env.notifications[0].body),
+    "generic connection-failure message, got " + JSON.stringify(env.notifications[0])
+  );
+})();
+
+// --- Test 8d-2: the actual crux of issue #1 — a config-save-triggered
+// failure notifies once, but the automatic reconnect(s) that follow it
+// must not notify again, even though they're retrying the very same bad
+// config that already failed once ---
+(function testAutomaticReconnectAfterSaveDoesNotRenotify() {
+  var env = freshEnv();
+  env.fire(
+    "webviewclosed",
+    { response: clayResponse({ HA_URL: "http://bad.local:8123", HA_TOKEN: "t" }) }
+  );
+  env.getLastSocket().onclose(); // save-triggered failure: notifies once
+  assert(env.notifications.length === 1, "save-triggered failure notifies once, got " + env.notifications.length);
+
+  env.scheduledTimeouts[env.scheduledTimeouts.length - 1].cb(); // automatic reconnect
+  env.getLastSocket().onclose(); // fails again, automatically
+  assert(env.notifications.length === 1, "an automatic reconnect failure after a save does not renotify, got " + env.notifications.length);
 })();
 
 // --- Test 8e: a normal drop after a successful connection does not
@@ -831,6 +859,41 @@ function freshEnv() {
 
   assert(oldSocket.closed === true, "the previously-open socket is closed when config is cleared");
   assert(env.getLastSocket() === oldSocket, "no new socket is opened for an unset config");
+})();
+
+// --- Test 8e-3/4/5: the phone's own live connection state TO Home
+// Assistant (haAuthenticated) is pushed to the watch as HA_CONN_VALUE
+// whenever it changes — see CHANNEL_HA_CONNECTED in src/c/types.h and
+// sendHaConnectionStatusToWatch() in src/pkjs/index.js. A different signal
+// from checkWatchConnection()'s watch<->phone Bluetooth report (Tests 1/
+// 1b/1c/1d above), which is sent to HA over the WebSocket, not to the
+// watch over AppMessage. ---
+(function testHaConnValuePushedOnAuthOk() {
+  var env = freshEnv();
+  env.authenticate();
+
+  assert(env.haConnAppMessages.length === 1, "HA_CONN_VALUE pushed once after auth_ok, got " + env.haConnAppMessages.length);
+  assert(env.haConnAppMessages[0].HA_CONN_VALUE === 1, "pushed as 1 (connected), got " + JSON.stringify(env.haConnAppMessages[0]));
+})();
+
+(function testHaConnValuePushedOnClose() {
+  var env = freshEnv();
+  env.authenticate();
+  env.getLastSocket().onclose();
+
+  assert(env.haConnAppMessages.length === 2, "HA_CONN_VALUE pushed again on close, got " + env.haConnAppMessages.length);
+  assert(env.haConnAppMessages[1].HA_CONN_VALUE === 0, "pushed as 0 (disconnected) on close, got " + JSON.stringify(env.haConnAppMessages[1]));
+})();
+
+(function testHaConnValueNotResentWhenUnchanged() {
+  var env = freshEnv();
+  env.authenticate();
+  // A second auth_ok on the same socket (not a realistic HA sequence, but
+  // exercises the dedup path directly) must not push HA_CONN_VALUE again,
+  // since the state (connected) hasn't actually changed.
+  env.getLastSocket().onmessage({ data: JSON.stringify({ type: "auth_ok" }) });
+
+  assert(env.haConnAppMessages.length === 1, "unchanged state is not re-pushed, got " + env.haConnAppMessages.length);
 })();
 
 // --- Test 8f: a failed AppMessage send is retried after a delay instead
@@ -1063,9 +1126,11 @@ function freshEnv() {
   var colorFields = [
     "CHARGE_ON_COLOR", "CHARGE_OFF_COLOR", "CHARGE_HIDE_WHEN",
     "CONN_ON_COLOR", "CONN_OFF_COLOR", "CONN_HIDE_WHEN",
+    "HA_CONN_ON_COLOR", "HA_CONN_OFF_COLOR", "HA_CONN_HIDE_WHEN",
   ];
   ["TIME", "DATE", "BATTERY", "STEPS", "CHARGE", "CONN", "ACTIVE_MINUTES", "DISTANCE",
-   "ACTIVE_KCAL", "RESTING_KCAL", "SLEEP_MINUTES", "SLEEP_RESTFUL_MINUTES", "HEART_RATE"].forEach(function (prefix) {
+   "ACTIVE_KCAL", "RESTING_KCAL", "SLEEP_MINUTES", "SLEEP_RESTFUL_MINUTES", "HEART_RATE",
+   "HA_CONN"].forEach(function (prefix) {
     colorFields.push(prefix + "_BG_COLOR", prefix + "_VALUE_COLOR", prefix + "_LABEL_COLOR");
   });
   colorFields.forEach(function (key) {
@@ -1073,8 +1138,8 @@ function freshEnv() {
   });
 
   assert(
-    Object.keys(claySettings).length === 68,
-    "test setup sanity check: exactly 68 WATCH_SETTINGS_KEYS fields, got " + Object.keys(claySettings).length
+    Object.keys(claySettings).length === 74,
+    "test setup sanity check: exactly 74 WATCH_SETTINGS_KEYS fields, got " + Object.keys(claySettings).length
   );
 
   var pendingCallbacks = [];
@@ -1102,7 +1167,7 @@ function freshEnv() {
   });
 
   var stringKeys = Object.keys(merged).filter(function (k) { return numericKeys.indexOf(k) === -1; });
-  assert(stringKeys.length === 45, "found all 45 string-read (TUPLE_CSTRING-checked) fields, got " + stringKeys.length);
+  assert(stringKeys.length === 51, "found all 51 string-read (TUPLE_CSTRING-checked) fields, got " + stringKeys.length);
   stringKeys.forEach(function (k) {
     assert(typeof merged[k] === "string", k + " left as a string (watch requires TUPLE_CSTRING), got " + typeof merged[k]);
   });

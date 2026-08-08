@@ -7,7 +7,7 @@ const ChannelIndex local_color_channels[NUM_LOCAL_COLOR_CHANNELS] = {
     CHANNEL_TIME, CHANNEL_DATE, CHANNEL_BATTERY, CHANNEL_STEPS,
     CHANNEL_BATTERY_CHARGING, CHANNEL_CONNECTED, CHANNEL_ACTIVE_MINUTES, CHANNEL_DISTANCE,
     CHANNEL_ACTIVE_KCAL, CHANNEL_RESTING_KCAL, CHANNEL_SLEEP_MINUTES, CHANNEL_SLEEP_RESTFUL_MINUTES,
-    CHANNEL_HEART_RATE,
+    CHANNEL_HEART_RATE, CHANNEL_HA_CONNECTED,
 };
 
 void init_channels(void) {
@@ -105,6 +105,16 @@ void init_channels(void) {
     };
     s_channels[CHANNEL_HEART_RATE] = (ChannelData) {
         .kind = CHANNEL_KIND_NUMERIC, .style = CHANNEL_STYLE_RAW, .label = "HR", .unit = "bpm",
+    };
+
+    // The phone's live connection state to Home Assistant — pushed by pkjs
+    // via HA_CONN_VALUE (see inbox_received_callback() in
+    // config_message.c), not computed from any on-watch API. .value left
+    // unset (zero-init) means "disconnected" until pkjs's first push, same
+    // as every other binary channel here.
+    s_channels[CHANNEL_HA_CONNECTED] = (ChannelData) {
+        .kind = CHANNEL_KIND_BINARY, .style = CHANNEL_STYLE_RAW, .label = "HA CONN",
+        .on_color = "green", .off_color = "red",
     };
 }
 

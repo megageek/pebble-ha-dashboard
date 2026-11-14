@@ -17,8 +17,10 @@ ENV PATH="/home/pebble/.local/bin:$PATH"
 # libsdl2-2.0-0/libpixman-1-0/libfdt1/libglib2.0-dev/libfreetype6-dev back the
 # QEMU emulator pebble-tool bundles; firefox-esr is handy for opening the Clay
 # config webview's data: URI when testing outside a real phone.
+# build-essential/gcc/python3-dev are needed to compile pypkjs C extensions.
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
+        build-essential \
         curl \
         libfreetype6-dev \
         bash-completion \
@@ -30,7 +32,8 @@ RUN apt-get update && \
         zsh \
         git \
         wget \
-        firefox-esr && \
+        firefox-esr \
+        python3-dev && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
 
@@ -86,7 +89,7 @@ RUN mkdir -p $NVM_DIR /home/pebble/.local/bin && \
 # Install pebble-tool (Python 3) and the pinned Pebble SDK — mirrors
 # .github/workflows/test.yml's install steps, which are the known-good recipe
 # for this repo's toolchain.
-RUN python3 -m pip install --user pebble-tool && \
+RUN python3 -m pip install --user pebble-tool uv && \
     ~/.local/bin/pebble sdk install ${PEBBLE_SDK_VERSION} && \
     ~/.local/bin/pebble sdk activate ${PEBBLE_SDK_VERSION}
 

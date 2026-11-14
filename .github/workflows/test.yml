@@ -36,7 +36,7 @@ jobs:
           key: pebble-sdk-${{ env.PEBBLE_SDK_VERSION }}
 
       - name: Install pebble-tool
-        run: pip install pebble-tool
+        run: pip install pebble-tool uv
 
       - name: Install Pebble SDK
         if: steps.cache-pebble-sdk.outputs.cache-hit != 'true'

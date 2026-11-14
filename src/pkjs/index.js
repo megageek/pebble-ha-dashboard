@@ -688,7 +688,15 @@ function connectToHomeAssistant() {
   // after reconnect anyway, and keeping stale cached state around is
   // harmless and strictly better than forgetting it.
 
-  var wsUrl = config.url.replace(/\/+$/, "") + "/api/websocket";
+  // Normalize http(s):// to ws(s)://. Older Pebble phone apps' WebSocket
+  // accepted an http(s) URL and upgraded it implicitly; newer ones fail
+  // instantly (readyState 0, no network round trip) unless the scheme is
+  // already ws/wss, so users can keep entering their normal HA URL in Clay.
+  var wsUrl =
+    config.url
+      .replace(/\/+$/, "")
+      .replace(/^https:\/\//i, "wss://")
+      .replace(/^http:\/\//i, "ws://") + "/api/websocket";
   console.log("Connecting to Home Assistant: " + wsUrl);
   haSocket = new WebSocket(wsUrl);
 

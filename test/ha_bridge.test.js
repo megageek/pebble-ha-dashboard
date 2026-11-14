@@ -242,7 +242,7 @@ function freshEnv() {
   env.fire("ready");
   var socket = env.getLastSocket();
 
-  assert(socket.url === "http://ha.local:8123/api/websocket", "connects to the configured HA URL");
+  assert(socket.url === "ws://ha.local:8123/api/websocket", "connects to the configured HA URL, http:// rewritten to ws://");
 
   socket.onmessage({ data: JSON.stringify({ type: "auth_required" }) });
   assert(
@@ -986,7 +986,7 @@ function freshEnv() {
   var env = freshEnv();
   env.fire("ready");
   var firstSocket = env.getLastSocket();
-  assert(firstSocket.url === "http://ha.local:8123/api/websocket", "initial connect uses the original URL");
+  assert(firstSocket.url === "ws://ha.local:8123/api/websocket", "initial connect uses the original URL");
 
   var claySavePayload = clayResponse({
     TEMPLATE_INDEX: 1,
@@ -1029,7 +1029,7 @@ function freshEnv() {
 
   var secondSocket = env.getLastSocket();
   assert(
-    secondSocket !== firstSocket && secondSocket.url === "http://new-ha.local:8123/api/websocket",
+    secondSocket !== firstSocket && secondSocket.url === "ws://new-ha.local:8123/api/websocket",
     "webviewclosed reconnected using the newly saved URL, got " + secondSocket.url
   );
 })();

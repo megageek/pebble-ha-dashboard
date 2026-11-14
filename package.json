@@ -22,7 +22,8 @@
       "watchface": true
     },
     "capabilities": [
-      "health"
+      "health",
+      "configurable"
     ],
     "messageKeys": [
       "TEMPLATE_INDEX",

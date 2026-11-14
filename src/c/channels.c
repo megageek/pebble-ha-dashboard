@@ -116,6 +116,19 @@ void init_channels(void) {
         .kind = CHANNEL_KIND_BINARY, .style = CHANNEL_STYLE_RAW, .label = "HA CONN",
         .on_color = "green", .off_color = "red",
     };
+
+    // Split-out day/date/year pieces for the card dashboard template's
+    // 3-column row (see build_template_2() in layout.c) — populated by
+    // update_time() alongside CHANNEL_TIME/CHANNEL_DATE.
+    s_channels[CHANNEL_DAY_NAME] = (ChannelData) {
+        .kind = CHANNEL_KIND_TEXT, .style = CHANNEL_STYLE_RAW, .label = "DAY",
+    };
+    s_channels[CHANNEL_DATE_SHORT] = (ChannelData) {
+        .kind = CHANNEL_KIND_TEXT, .style = CHANNEL_STYLE_RAW, .label = "DATE",
+    };
+    s_channels[CHANNEL_YEAR] = (ChannelData) {
+        .kind = CHANNEL_KIND_TEXT, .style = CHANNEL_STYLE_RAW, .label = "YEAR",
+    };
 }
 
 GColor color_from_name(const char *name) {
@@ -127,6 +140,7 @@ GColor color_from_name(const char *name) {
     if (strcmp(name, "purple") == 0) return GColorPurple;
     if (strcmp(name, "white") == 0) return GColorWhite;
     if (strcmp(name, "gray") == 0) return GColorLightGray;
+    if (strcmp(name, "black") == 0) return GColorBlack;
     return GColorLightGray;
 }
 

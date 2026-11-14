@@ -571,6 +571,7 @@ void inbox_received_callback(DictionaryIterator *iterator, void *context) {
         APP_LOG(APP_LOG_LEVEL_DEBUG, "rebuilding layout");
         Layer *window_layer = window_get_root_layer(s_main_window);
         GRect bounds = layer_get_bounds(window_layer);
+        window_set_background_color(s_main_window, active_template_bg_color());
         destroy_active_layout();
         load_active_layout(window_layer, bounds);
 

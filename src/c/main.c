@@ -16,10 +16,9 @@ static void main_window_load(Window *window) {
     Layer *window_layer = window_get_root_layer(window);
     GRect bounds = layer_get_bounds(window_layer);
 
-    window_set_background_color(window, GColorBlack);
-
     init_channels();
-    load_config();
+    load_config();  // restores s_active_template, needed by active_template_bg_color() below
+    window_set_background_color(window, active_template_bg_color());
     load_active_layout(window_layer, bounds);
 
     update_time();

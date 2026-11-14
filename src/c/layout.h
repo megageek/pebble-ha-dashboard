@@ -11,9 +11,17 @@
 
 typedef int (*TemplateBuilder)(GRect bounds, SlotSpec *out);
 
-// Number of built-in templates (currently 2) — needed by config_message.c
+// Number of built-in templates (currently 3) — needed by config_message.c
 // to validate an incoming TEMPLATE_INDEX before accepting it.
 extern const int NUM_TEMPLATES;
+
+// Each template's window background color (see s_template_bg_colors in
+// layout.c) — most templates assume the original black background (no
+// bg_color = black shows through, see rendering.c), but a card-style
+// template needs a light page background instead. Called by main.c at
+// startup and by config_message.c whenever a live TEMPLATE_INDEX change
+// rebuilds the layout, since s_active_template must already be set.
+GColor active_template_bg_color(void);
 
 // The single shared app window — owned by main.c (created/destroyed in
 // init()/deinit(), handlers set in main_window_load()/unload()), but

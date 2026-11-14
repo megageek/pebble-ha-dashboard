@@ -13,9 +13,10 @@
 // 7=BATTERY_CHARGING, 8=CONNECTED, 9=ACTIVE_MINUTES, 10=DISTANCE,
 // 11=ACTIVE_KCAL, 12=RESTING_KCAL, 13=SLEEP_MINUTES, 14=SLEEP_RESTFUL_MINUTES,
 // 15=HEART_RATE, 16=HA4, 17=HA5, 18=HA6, 19=HA7, 20=HA8, 21=HA9, 22=HA10,
-// 23=HA_CONNECTED. The new ones (7-15, then 16-22, then 23) are each
-// appended after whatever came before them rather than interleaved, so a
-// previously-persisted slot assignment keeps meaning the same channel.
+// 23=HA_CONNECTED, 24=DAY_NAME, 25=DATE_SHORT, 26=YEAR. The new ones
+// (7-15, then 16-22, then 23, then 24-26) are each appended after whatever
+// came before them rather than interleaved, so a previously-persisted slot
+// assignment keeps meaning the same channel.
 typedef enum {
     CHANNEL_TIME,
     CHANNEL_DATE,
@@ -58,6 +59,17 @@ typedef enum {
     // CHANNEL_HA_10, for the same persisted-slot-compatibility reason as
     // every other group above.
     CHANNEL_HA_CONNECTED,
+    // Split-out pieces of the day/date/year row used by the card dashboard
+    // template (SLOT_SIZE_CARD, build_template_2() in layout.c) — CHANNEL_DATE
+    // already combines all three ("%a %d %b") and its format can't change
+    // without altering templates 0/1, so these are new, narrower channels
+    // rather than a reformat of an existing one. Display-only: unlike the
+    // channels above, these are deliberately not in local_color_channels[]
+    // (no Clay-configurable colors) since they're single-purpose, not
+    // general-purpose like CHANNEL_HA_1..10/CHANNEL_CONNECTED.
+    CHANNEL_DAY_NAME,
+    CHANNEL_DATE_SHORT,
+    CHANNEL_YEAR,
     NUM_CHANNELS,
 } ChannelIndex;
 
@@ -96,8 +108,10 @@ typedef struct {
     // as a dot. Empty string = "no override": falls back to whatever color
     // the slot's size class would normally use (see rendering.c), so an
     // unconfigured channel looks exactly like it always has. label_color
-    // only has an effect in SLOT_SIZE_SMALL, the only size class that
-    // renders a label at all.
+    // only has an effect in SLOT_SIZE_SMALL/SLOT_SIZE_CARD, the only size
+    // classes that render a label at all. bg_color has no visible effect on
+    // SLOT_SIZE_CARD specifically — a card always self-fills white/black,
+    // see draw_channel_card() in rendering.c.
     char bg_color[8];
     char value_color[8];
     char label_color[8];
@@ -111,6 +125,11 @@ typedef enum {
     SLOT_SIZE_HERO,
     SLOT_SIZE_MEDIUM,
     SLOT_SIZE_SMALL,
+    // A bordered card: label on top, big value below (or an enlarged bar
+    // for style==BAR channels) — see draw_channel_card() in rendering.c.
+    // Font size adapts to the slot's actual height at draw time rather
+    // than needing a second "small card" enum value.
+    SLOT_SIZE_CARD,
 } SlotSizeClass;
 
 typedef struct {

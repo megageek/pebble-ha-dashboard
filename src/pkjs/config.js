@@ -5,9 +5,10 @@
 // 7=BATTERY_CHARGING, 8=CONNECTED, 9=ACTIVE_MINUTES, 10=DISTANCE,
 // 11=ACTIVE_KCAL, 12=RESTING_KCAL, 13=SLEEP_MINUTES, 14=SLEEP_RESTFUL_MINUTES,
 // 15=HEART_RATE, 16=HA4, 17=HA5, 18=HA6, 19=HA7, 20=HA8, 21=HA9, 22=HA10,
-// 23=HA_CONNECTED. The new ones (7-15, then 16-22, then 23) are each
-// appended after whatever came before them rather than interleaved, so a
-// previously-persisted slot assignment keeps meaning the same channel.
+// 23=HA_CONNECTED, 24=DAY_NAME, 25=DATE_SHORT, 26=YEAR. The new ones
+// (7-15, then 16-22, then 23, then 24-26) are each appended after whatever
+// came before them rather than interleaved, so a previously-persisted slot
+// assignment keeps meaning the same channel.
 var CHANNEL_OPTIONS = [
   { label: "Time", value: 0 },
   { label: "Date", value: 1 },
@@ -33,6 +34,9 @@ var CHANNEL_OPTIONS = [
   { label: "HA channel 9", value: 21 },
   { label: "HA channel 10", value: 22 },
   { label: "HA connected", value: 23 },
+  { label: "Day name", value: 24 },
+  { label: "Date (short)", value: 25 },
+  { label: "Year", value: 26 },
 ];
 
 function slotSelect(slotIndex, defaultChannel) {
@@ -76,6 +80,7 @@ var COLOR_OPTIONS = [
   { label: "Purple", value: "purple" },
   { label: "White", value: "white" },
   { label: "Gray", value: "gray" },
+  { label: "Black", value: "black" },
 ];
 
 var HIDE_WHEN_OPTIONS = [
@@ -180,6 +185,7 @@ module.exports = [
     options: [
       { label: "Clock hero + 3 stats", value: 0 },
       { label: "Battery hero + 4 stats", value: 1 },
+      { label: "Card dashboard", value: 2 },
     ],
   },
   {
@@ -190,9 +196,9 @@ module.exports = [
   {
     type: "text",
     defaultValue:
-      "Both current templates use only the first 5 slots. Slots 6-10 " +
-      "are here for future/custom layouts and are ignored by either " +
-      "template today.",
+      "Each template uses a different number of these 10 slots (5 for " +
+      "the two clock/battery layouts, 8 for the card dashboard) — any " +
+      "slots beyond what the active template uses are ignored.",
   },
   // Defaults mirror Template 0's slot assignments (see build_template_0
   // in main.c): hero=Time, medium=Date, small rows=Battery/Steps/HA1.

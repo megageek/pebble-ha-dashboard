@@ -15,6 +15,12 @@ void update_time(void) {
               clock_is_24h_style() ? "%H:%M" : "%I:%M", tick_time);
     strftime(s_channels[CHANNEL_DATE].text, sizeof(s_channels[CHANNEL_DATE].text),
               "%a %d %b", tick_time);
+    strftime(s_channels[CHANNEL_DAY_NAME].text, sizeof(s_channels[CHANNEL_DAY_NAME].text),
+              "%a", tick_time);
+    strftime(s_channels[CHANNEL_DATE_SHORT].text, sizeof(s_channels[CHANNEL_DATE_SHORT].text),
+              "%d %b", tick_time);
+    strftime(s_channels[CHANNEL_YEAR].text, sizeof(s_channels[CHANNEL_YEAR].text),
+              "%Y", tick_time);
 
     mark_all_slots_dirty();
 }
